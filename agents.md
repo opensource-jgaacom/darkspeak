@@ -21,6 +21,18 @@ The project is being resurrected and improved.
 
 - **Protocol-level backward compatibility is a non-goal.** There are no supported legacy clients. Do not implement old-protocol negotiation/fallback, compatibility adapters, migration or legacy interoperability tests. Reject peers missing mandatory current protocol capabilities; use versioned formats only for current validation and safety. Ask the owner before any compatibility work. 
 
+## Context management
+
+- Treat the repository as authoritative, not conversation memory.
+- Read only specifications relevant to the active task.
+- Prefer targeted searches and section reads.
+- Delegate broad codebase exploration to an explorer subagent.
+- Do not load full test logs into context when summaries suffice.
+- Do not load completed implementation history.
+- Work on one checklist item at a time.
+- Keep task handoffs concise and record them in the repository.
+- Start a new session at major implementation boundaries.
+
 ## Implementation worklists and scope control
 
 - Use Markdown task checkboxes (`- [ ]` remaining, `- [x]` verified complete) for every actionable worklist item. **Check off completed items immediately**, citing the relevant test/commit when useful; never leave finished work as an indefinite "remaining" task. Keep a short, separate completed summary, not an ever-growing chronological diary.
