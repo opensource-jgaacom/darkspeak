@@ -145,7 +145,7 @@ message RequestDownloadResult {
 - GET requires current READ/DOWNLOAD for the same mount context and regular file. If expected SHA-256/size is supplied, refuse mismatched immutable content rather than silently serving newer bytes. Do not use `RequestDownload` for upload, native path materialization or arbitrary blob fetch.
 - On admission, the server prepares one bound VFS reader and immutable content identity, then creates an ordinary outgoing `FileOffer` with that transfer ID through the existing generic engine. Downloads inherit the existing checkpoint/resume/session/deadline/cancellation rules. Reauthorize subsequent reads and resumption. `FILESHARE_OK` does not mean the recipient has accepted the FileOffer or completed the transfer.
 - The accepted transfer's `FileOffer.name` is a bounded, possibly escaped safe download suggestion; the full remote VFS logical name/path remains available in FileShare metadata and cannot be overwritten by host-specific materialization.
-- Feature purpose is **trusted local context**: ordinary FileShare content may be chargeable in the later exchange phase; catalog exports, thumbnails and previews are exempt regardless of peer-specified strings. No credit ledgers implemented at this initial protocol stage.
+- Feature purpose is **trusted local context**: ordinary FileShare content may be chargeable in the later exchange phase; catalog exports, thumbnails and previews are exempt regardless of peer-specified strings. Per-identity credits are OFF by default and never required for ordinary authorized FTP operations; see `fileshare_credits.md`. No credit ledgers implemented at this initial protocol stage.
 
 ## 6. Cancellation, subscriptions, and protocol resources
 
