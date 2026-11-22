@@ -88,9 +88,9 @@ Implement persistent identity/group/contact configuration and provenance only wh
 
 Acceptance: restart, complementary/conflicting groups, path DENIED/reopening, field merges, assignment confinement and active-handle revocation.
 
-## 5. Upload recovery coordinator — DEFER until FTP uploads
+## 5. Upload recovery coordinator — DEFER until after interactive downloads
 
-Requires the FTP upload/server workflows to be specified and scheduled. This is **not** generic file transfer storage or a requirement for the normal storage/mount UI.
+Requires `specs/ftp/fileshare_uploads.md` to be scheduled **after interactive read-only FTP browse/download verification**; upload-specific wire operations are deferred. This is **not** generic file transfer storage or a requirement for the normal storage/mount UI.
 
 - [ ] Add a private versioned SQLite intent/step journal with stable workflow IDs and idempotent participant outcomes.
 - [ ] Atomically claim verified duplicate content within the specified scope. Keep manual acceptance in private quota-accounted quarantine.
@@ -98,9 +98,9 @@ Requires the FTP upload/server workflows to be specified and scheduled. This is 
 
 Acceptance: duplicate races, every cross-database crash boundary, manual rejection/acceptance, restart reconciliation and bounded quarantine expiration.
 
-## 6. Byte credit ledger and admission — DEFER until FTP exchange
+## 6. Byte credit ledger and admission — OPTIONAL; OFF by default per identity; DEFER until FTP exchange
 
-Do not implement byte-credit accounting in the generic transfer engine or block ordinary attachments on it. Credit administration controls in `specs/ftp/fileshare_ui.md` must use the real feature service when available, or explicitly show unsupported/disabled state until the scheduled credit milestone.
+Per `specs/ftp/fileshare_credits.md`, identity-level exchange credits are OFF by default; ordinary FTP downloads and uploads work without this subsystem. Do not implement byte-credit accounting in the generic transfer engine or block ordinary attachments on it. Credit administration controls in `specs/ftp/fileshare_ui.md` must use the real feature service when available, or explicitly show unsupported/disabled state until the scheduled credit milestone.
 
 - [ ] Persist immutable entitlements, policy-specific fractional remainders, manual adjustments, settled balance B and reservations R. Spendable balance is B-R; a transfer includes its own reservation when reevaluated. Negative B is legal; earned caps apply to B.
 - [ ] Advance fractional arithmetic only on first approval. Preserve the remainder through cap clipping; revoke/reapprove the original awarded whole amount without recalculation.
