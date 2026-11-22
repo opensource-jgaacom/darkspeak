@@ -14,7 +14,8 @@ FileShare lets DarkSpeak identities expose selected virtual directory trees for 
 - `fileshare_server.md`: FileShare read-only remote service, portable UNIX-like virtual namespace, direct and optional recursive listings, STAT and downloads.
 - `fileshare_protocol.md`: FileShare-specific feature controls, canonical path encodings and no-data recursive rejection.
 - `../transfer_queue.md` and `../transfer_queue_ui.md`: one application-wide inbound/outbound queue, feature policies, priority-safe checkpoint preemption and unified transfer UI.
-- Future specs: groups; browser; remote write/mutation protocol; tags/ratings; SHA-256 content dispositions.
+- `fileshare_browser.md`: shared C++ local/remote browser, Dolphin-style presentation, incremental paged listings and viewport-aware updates.
+- Future specs: groups; remote write/mutation protocol; tags/ratings; SHA-256 content dispositions.
 
 ```text
 Application-wide read-only sources --+--> IFileManager namespaces --+
@@ -36,7 +37,7 @@ Transfer queues/history -------------> existing transfer engine + authorized VFS
 Tags/ratings/content registry -------> local metadata/query consumers
 ```
 
-FileManager implementations know neither DarkSpeak identities nor contacts, protocol, UI, or group policy. VFS composition knows identity and mount topology, but delegates physical storage and indexing. Core authorization owns user/group/path permissions, quota decisions and effective-permission explanations; the optional credit subsystem owns exchange accounting; the server enforces those decisions for every remote operation. The browser is a consumer, not another storage implementation. No second FileShare file-transfer engine. **Generic transfers are feature-neutral**: message/profile attachments, FileShare content, previews, catalog exports and future uses share transport/integrity/resume, but each feature owns its own acceptance, storage authorization and policies. Message/profile transfers do not depend on FileShare VFS or accounting; FileShare previews, thumbnails and catalog exports are uncharged in both directions. Trusted local feature purpose, not peer MIME/filename, classifies chargeability.
+FileManager implementations know neither DarkSpeak identities nor contacts, protocol, UI, or group policy. VFS composition knows identity and mount topology, but delegates physical storage and indexing. Core authorization owns user/group/path permissions, quota decisions and effective-permission explanations; the optional credit subsystem owns exchange accounting; the server enforces those decisions for every remote operation. The browser is a shared local/remote VFS-oriented C++ model and UI consumer (`fileshare_browser.md`), not another storage implementation. No second FileShare file-transfer engine. **Generic transfers are feature-neutral**: message/profile attachments, FileShare content, previews, catalog exports and future uses share transport/integrity/resume, but each feature owns its own acceptance, storage authorization and policies. Message/profile transfers do not depend on FileShare VFS or accounting; FileShare previews, thumbnails and catalog exports are uncharged in both directions. Trusted local feature purpose, not peer MIME/filename, classifies chargeability.
 
 ## 2. Single storage interface, registry and ownership
 
