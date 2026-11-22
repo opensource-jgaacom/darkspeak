@@ -86,6 +86,21 @@ add_test(NAME ui_history_model COMMAND ui_history_model_test)
 set_tests_properties(ui_history_model PROPERTIES TIMEOUT 30)
 
 add_executable(managed_storage_test managed_storage_test.cpp)
+add_executable(storage_diagnostics_test storage_diagnostics_test.cpp)
+target_compile_features(storage_diagnostics_test PRIVATE cxx_std_20)
+target_link_libraries(storage_diagnostics_test PRIVATE DSFileManager::FileManager Qt6::Test Qt6::Sql logfault::logfault)
+add_test(NAME storage_diagnostics COMMAND storage_diagnostics_test)
+set_tests_properties(storage_diagnostics PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_executable(readonly_resources_test readonly_resources_test.cpp
+    ../src/corelib/src/readonlyresources.cpp ../src/corelib/include/ds/readonlyresources.h
+    ../src/app/appearance.cpp ../src/app/appearance.h)
+target_compile_features(readonly_resources_test PRIVATE cxx_std_20)
+target_include_directories(readonly_resources_test PRIVATE ../src/corelib/include ../src/app)
+target_compile_definitions(readonly_resources_test PRIVATE DS_APP_QML="${CMAKE_CURRENT_SOURCE_DIR}/../src/app"
+    DS_STORAGE_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+target_link_libraries(readonly_resources_test PRIVATE dsvfs Qt6::Test Qt6::Widgets Qt6::Quick Qt6::QuickControls2 logfault::logfault)
+add_test(NAME readonly_resources COMMAND readonly_resources_test)
+set_tests_properties(readonly_resources PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic")
 target_compile_features(managed_storage_test PRIVATE cxx_std_20)
 target_link_libraries(managed_storage_test PRIVATE models prot Qt6::Test)
 target_include_directories(managed_storage_test PRIVATE ../dependencies/logfault/include)
@@ -169,3 +184,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 add_test(NAME media_preview COMMAND media_preview_test)
 set_tests_properties(media_preview PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(share_mounts_test share_mounts_test.cpp
+    ../src/corelib/src/sharemounts.cpp ../src/corelib/include/ds/sharemounts.h
+    ../src/app/appearance.cpp ../src/app/appearance.h)
+target_compile_features(share_mounts_test PRIVATE cxx_std_20)
+target_include_directories(share_mounts_test PRIVATE ../src/corelib/include ../src/app)
+target_compile_definitions(share_mounts_test PRIVATE DS_APP_QML="${CMAKE_CURRENT_SOURCE_DIR}/../src/app")
+target_link_libraries(share_mounts_test PRIVATE dsvfs Qt6::Test Qt6::Widgets Qt6::Quick Qt6::QuickControls2 logfault::logfault)
+add_test(NAME share_mounts COMMAND share_mounts_test)
+set_tests_properties(share_mounts PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic")

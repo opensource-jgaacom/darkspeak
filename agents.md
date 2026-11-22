@@ -107,6 +107,7 @@ explicit local bound and authorization check. Parsing and validation
 failures terminate the connection before application dispatch.**
 
 - Be generous with trace and debug log statements so troubleshooting is simple. 
+- TRACE failures must identify the operation and failed validation or storage/SQL stage, expected versus observed versions when applicable, and native error codes. A generic numeric failure alone is insufficient; never log bound SQL values, file contents, keys or sealed payloads to supply this detail.
 - Never log private keys, sealed payloads, or plaintext message/file contents.
 - Never trust a peer-provided length, offset, chunk count, filename, or channel
   without bounds and checked arithmetic.

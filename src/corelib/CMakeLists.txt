@@ -18,6 +18,10 @@ add_library(${PROJECT_NAME} STATIC
     src/conversation.cpp
     src/file.cpp
     src/managedstorage.cpp
+    src/sharemounts.cpp
+    include/ds/sharemounts.h
+    src/readonlyresources.cpp
+    include/ds/readonlyresources.h
     src/mediapreview.cpp
     src/videopreview.cpp
     include/ds/ffmpeg.h

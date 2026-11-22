@@ -39,6 +39,9 @@
 #include "ds/torprotocolmanager.h"
 #include "ds/logutil.h"
 #include "ds/avatarutil.h"
+#include "ds/filemanager.h"
+#include "ds/readonlyresources.h"
+#include "ds/sharemounts.h"
 #include "filedialogmodel.h"
 #include "desktop_integration.h"
 #include "video_preview_support.h"
@@ -362,6 +365,44 @@ int main(int argc, char *argv[])
 #endif
     VideoPreviewSupport videoPreviewSupport(DsEngine::instance().settings());
     QQmlApplicationEngine engine;
+    auto &storage = DsEngine::instance().getFileManager()->storage();
+    ds::core::ReadOnlyResources::Host storage_host;
+    storage_host.hold = [&storage] { return std::make_shared<ds::core::ManagedStorage::Operation>(storage.holdOperation()); };
+    storage_host.open = [&storage](dsfm::ReadOnlyNamespaceConfig config, bool create) {
+        return storage.openReadOnlySource(std::move(config), create);
+    };
+    storage_host.close = [&storage](dsfm::NamespaceId ns) { return storage.closeReadOnlySource(ns); };
+    storage_host.info = [&storage](dsfm::NamespaceId ns) { return storage.readOnlyManager()->namespaceInfo(ns); };
+    storage_host.config = [&storage](dsfm::NamespaceId ns) { return storage.readOnlyManager()->sourceConfig(ns); };
+    storage_host.remove = [&storage](dsfm::NamespaceId ns) -> QCoro::Task<dsfm::Result<void>> {
+        auto vfs = co_await storage.openVfs();
+        if (!vfs) co_return vfs.error();
+        // Trusted local administration only; never handed to a remote peer.
+        dsvfs::Request admin;
+        admin.scope = QUuid::createUuid();
+        admin.generation = 1;
+        admin.current_generation = std::make_shared<std::atomic<quint64>>(1);
+        admin.authorize = [](dsvfs::Target, dsvfs::Operation op) -> dsfm::Result<bool> { return op == dsvfs::Operation::ConfigureMounts; };
+        admin.commit_permit = [](dsvfs::Target, dsvfs::Operation) -> dsfm::Result<std::shared_ptr<void>> { return std::static_pointer_cast<void>(std::make_shared<int>(0)); };
+        auto removed = co_await vfs.value()->unregisterReadOnlyNamespace(ns, admin);
+        if (!removed) co_return removed.error();
+        if (!storage.readOnlyManager()) co_return dsfm::Result<void>{};
+        co_return co_await storage.readOnlyManager()->removeSource(ns);
+    };
+    const auto storage_registry = QDir(QFileInfo(DsEngine::instance().settings().value("dbpath").toString()).absolutePath())
+        .filePath("readonly-resources-v1.json");
+    auto *read_only_resources = new ds::core::ReadOnlyResources(storage_registry, std::move(storage_host), &storage);
+    QObject::connect(&storage, &ds::core::ManagedStorage::shutdownStarted, read_only_resources, &ds::core::ReadOnlyResources::stop);
+    engine.rootContext()->setContextProperty("readOnlyResources", read_only_resources);
+    read_only_resources->refresh();
+    ds::core::ShareMounts::Host mounts_host;
+    mounts_host.hold = [&storage] { return std::make_shared<ds::core::ManagedStorage::Operation>(storage.holdOperation()); };
+    mounts_host.identityExists = [](QUuid id) { return DsEngine::instance().getIdentityManager()->identityFromUuid(id) != nullptr; };
+    mounts_host.open = [&storage] { return storage.openVfs(); };
+    mounts_host.backend = [&storage]() -> dsfm::IFileManager* { return storage.readOnlyManager(); };
+    auto *share_mounts = new ds::core::ShareMounts(std::move(mounts_host), &storage);
+    QObject::connect(&storage, &ds::core::ManagedStorage::shutdownStarted, share_mounts, &ds::core::ShareMounts::stop);
+    engine.rootContext()->setContextProperty("shareMounts", share_mounts);
     engine.rootContext()->setContextProperty("videoPreviewSupport", &videoPreviewSupport);
 #ifdef DARKSPEAK_WITH_MCP
     engine.rootContext()->setContextProperty("mcp", mcp_service.get());

@@ -71,6 +71,8 @@ qt_add_qml_module(${PROJECT_NAME}
         TorSettings.qml
         SettingsDialog.qml
         PathsSettings.qml
+        ShareMountDialog.qml
+        ReadOnlyStorageDialog.qml
         LogSettings.qml
         RoundedImage.qml
         Header.qml

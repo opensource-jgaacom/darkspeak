@@ -1053,6 +1053,59 @@ QCoro::Task<Result<void>> ReadOnlyFileManager::closeSource(NamespaceId ns) {
 QCoro::Task<Result<ReadOnlyNamespaceConfig>> ReadOnlyFileManager::sourceConfig(NamespaceId ns) {
     return impl_->run<ReadOnlyNamespaceConfig>([ns](Impl& impl) -> Result<ReadOnlyNamespaceConfig> { return impl.source(ns)->config; });
 }
+QCoro::Task<Result<void>> ReadOnlyFileManager::removeSource(NamespaceId ns) {
+    return impl_->run<void>([ns](Impl& impl) -> Result<void> {
+        require(!ns.isNull(), ErrorCode::InvalidArgument);
+        auto root = openRoot(impl.private_root, false);
+        const auto name = QFile::encodeName(uuid(ns));
+        struct stat backup{};
+        if (::fstatat(root.value, (name + ".reindex-backup").constData(), &backup, AT_SYMLINK_NOFOLLOW) == 0)
+            fail(ErrorCode::Conflict);
+        require(errno == ENOENT, ErrorCode::IoError);
+        auto found = impl.sources.find(ns);
+        std::shared_ptr<Source> source;
+        if (found != impl.sources.end()) {
+            source = found->second;
+            impl.watch(source->config.common.storage_root, false);
+            source->stopped = true; source->access_epoch->store(0); expireReaders(*source); source->scanning.reset();
+            { std::lock_guard lock(source->observer_mutex); for (const auto& sub : source->observers) sub->active->store(false); source->observers.clear(); }
+            if (source->catalog.db) {
+                require(sqlite3_close(source->catalog.db) == SQLITE_OK, ErrorCode::Busy);
+                source->catalog.db = nullptr;
+            }
+        }
+        struct stat entry{};
+        if (::fstatat(root.value, name.constData(), &entry, AT_SYMLINK_NOFOLLOW) != 0) {
+            require(errno == ENOENT, ErrorCode::IoError);
+            return {};
+        }
+        auto directory = openBeneath(root.value, name, O_RDONLY | O_DIRECTORY); identity(directory.value, true);
+        auto lock = source ? Fd{} : openBeneath(directory.value, "owner.lock", O_RDWR);
+        if (!source) { identity(lock.value); require(::flock(lock.value, LOCK_EX | LOCK_NB) == 0, ErrorCode::NamespaceBusy); }
+        auto* stream = ::fdopendir(::fcntl(directory.value, F_DUPFD_CLOEXEC, 0)); ioCheck(stream != nullptr);
+        auto close_stream = qScopeGuard([&] { ::closedir(stream); });
+        quint32 entries = 0;
+        for (;;) {
+            errno = 0; const auto* item = ::readdir(stream);
+            if (!item) { ioCheck(errno == 0); break; }
+            require(++entries <= 8, ErrorCode::Conflict);
+            const QByteArray file(item->d_name);
+            require(file == "." || file == ".." || file == "catalog.db" || file == "catalog.db-journal" || file == "owner.lock", ErrorCode::Conflict);
+        }
+        // No recursive deletion: unexpected files (including recovery artifacts)
+        // keep the directory and make this operation fail visibly.
+        for (const auto* file : {"catalog.db-journal", "catalog.db", "owner.lock"})
+            require(::unlinkat(directory.value, file, 0) == 0 || errno == ENOENT, ErrorCode::IoError);
+        require(::unlinkat(root.value, name.constData(), AT_REMOVEDIR) == 0, ErrorCode::IoError);
+        if (source && source->config.common.storage_pool) {
+            auto released = PoolAccess::release(*source->config.common.storage_pool, sourceMetadataClaim(*source), ns);
+            if (!released) throw Failure{released.error()};
+        }
+        impl.sources.erase(ns);
+        { std::lock_guard guard(impl.registration_mutex); impl.known_sources.erase(ns); }
+        return {};
+    });
+}
 QCoro::Task<Result<NamespaceInfo>> ReadOnlyFileManager::reindexSource(ReadOnlyNamespaceConfig config, CancellationToken cancel) {
     auto impl = impl_;
     auto result = co_await impl->run<NamespaceInfo>([config = std::move(config), cancel](Impl& state) mutable -> Result<NamespaceInfo> {

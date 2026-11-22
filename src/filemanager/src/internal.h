@@ -16,11 +16,24 @@
 #include <QSet>
 #include <QTimeZone>
 #include <unistd.h>
+#include <source_location>
+#include <string_view>
+#include <logfault/logfault.h>
 
 namespace dsfm::detail {
 struct Failure { Error error; };
-[[noreturn]] inline void fail(ErrorCode code, int native_code = 0) { throw Failure{{code, native_code}}; }
-inline void require(bool condition, ErrorCode code) { if (!condition) fail(code); }
+[[noreturn]] inline void fail(ErrorCode code, int native_code = 0,
+                             std::source_location location = std::source_location::current()) {
+    const std::string_view path{location.file_name()};
+    const auto name = path.substr(path.find_last_of("/\\") + 1);
+    LFLOG_TRACE << "FileManager failure; source=" << name << ':' << location.line()
+                << ", code=" << int(code) << ", native=" << native_code;
+    throw Failure{{code, native_code}};
+}
+inline void require(bool condition, ErrorCode code,
+                    std::source_location location = std::source_location::current()) {
+    if (!condition) fail(code, 0, location);
+}
 void ioCheck(bool condition);
 // Each synchronous scheduler job scopes its policy, including SQLite VFS calls.
 // Never keep this scope across a coroutine suspension.
@@ -67,8 +80,10 @@ class Catalog {
 public:
     Catalog(const QString& path, quint64 max_bytes, bool create);
     ~Catalog();
-    QSqlQuery query(const QString& sql, const QVariantList& args = {});
-    QVariant scalar(const QString& sql, const QVariantList& args = {});
+    QSqlQuery query(const QString& sql, const QVariantList& args = {},
+                    std::source_location location = std::source_location::current());
+    QVariant scalar(const QString& sql, const QVariantList& args = {},
+                    std::source_location location = std::source_location::current());
     void begin();
     void commit();
     void rollback();

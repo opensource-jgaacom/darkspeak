@@ -54,29 +54,42 @@ Catalog::Catalog(const QString& path, quint64 max_bytes, bool create) {
             setMeta("schema", "2"); setMeta("generation", "0");
             transaction.commit();
         }
-        require(meta("schema") == "2", ErrorCode::Corruption);
+        const auto schema = meta("schema");
+        if (schema != "2") {
+            bool numeric = false;
+            const auto version = schema.toInt(&numeric);
+            LFLOG_TRACE << "Managed catalog schema validation failed; expected=2, stored="
+                        << (numeric ? version : -1) << ", missing=" << schema.isEmpty();
+            fail(ErrorCode::Corruption);
+        }
     } catch (...) {
         db.close(); db = {}; QSqlDatabase::removeDatabase(connection_); throw;
     }
 }
 Catalog::~Catalog() { db.close(); db = {}; QSqlDatabase::removeDatabase(connection_); }
-QSqlQuery Catalog::query(const QString& sql, const QVariantList& args) {
+QSqlQuery Catalog::query(const QString& sql, const QVariantList& args, std::source_location location) {
     QSqlQuery query(db);
-    require(query.prepare(sql), ErrorCode::Corruption);
+    if (!query.prepare(sql)) {
+        const auto error = query.lastError();
+        const auto native = error.nativeErrorCode().toInt();
+        LFLOG_TRACE << "Managed catalog SQL preparation failed; error_type=" << int(error.type()) << ", native=" << native;
+        fail(ErrorCode::Corruption, native, location);
+    }
     for (auto value : args) {
         if (value.metaType().id() == QMetaType::QString && value.toString().isNull()) value = QStringLiteral("");
         query.addBindValue(value);
     }
     if (!query.exec()) {
         const auto native = query.lastError().nativeErrorCode().toInt();
-        if (native == 13) fail(ErrorCode::DiskFull, native);
-        if (native == 19 || native == 2067 || native == 1555) fail(ErrorCode::Conflict, native);
-        fail(ErrorCode::Corruption, native);
+        LFLOG_TRACE << "Managed catalog SQL execution failed; error_type=" << int(query.lastError().type()) << ", native=" << native;
+        if (native == 13) fail(ErrorCode::DiskFull, native, location);
+        if (native == 19 || native == 2067 || native == 1555) fail(ErrorCode::Conflict, native, location);
+        fail(ErrorCode::Corruption, native, location);
     }
     return query;
 }
-QVariant Catalog::scalar(const QString& sql, const QVariantList& args) {
-    auto result = query(sql, args);
+QVariant Catalog::scalar(const QString& sql, const QVariantList& args, std::source_location location) {
+    auto result = query(sql, args, location);
     return result.next() ? result.value(0) : QVariant{};
 }
 void Catalog::begin() { query("BEGIN IMMEDIATE"); }
@@ -162,7 +175,15 @@ QJsonObject limitsJson(const NamespaceLimits& limits) {
 }
 NamespaceLimits readLimits(const QJsonObject& object) {
     NamespaceLimits limits;
-#define DSFM_GET(field) { bool ok = false; const auto value = object[#field].toString().toULongLong(&ok); require(ok && value <= std::numeric_limits<decltype(limits.field)>::max(), ErrorCode::Corruption); limits.field = decltype(limits.field)(value); }
+#define DSFM_GET(field) { \
+    bool ok = false; const auto value = object[#field].toString().toULongLong(&ok); \
+    if (!ok || value > std::numeric_limits<decltype(limits.field)>::max()) { \
+        LFLOG_TRACE << "Managed catalog limit validation failed; field=" << #field \
+                    << ", missing=" << !object.contains(#field) << ", unsigned_integer=" << ok; \
+        fail(ErrorCode::Corruption); \
+    } \
+    limits.field = decltype(limits.field)(value); \
+}
     DSFM_LIMITS(DSFM_GET)
 #undef DSFM_GET
     validateLimits(limits);

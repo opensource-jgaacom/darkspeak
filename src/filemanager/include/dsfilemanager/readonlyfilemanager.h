@@ -63,6 +63,9 @@ public:
     QCoro::Task<Result<NamespaceInfo>> reindexSource(ReadOnlyNamespaceConfig config, CancellationToken cancel = {});
     QCoro::Task<Result<void>> updateExclusions(NamespaceId ns, ExclusionPolicy policy);
     QCoro::Task<Result<void>> closeSource(NamespaceId ns);
+    // Explicit local unregister: only this namespace's private index is removed.
+    // A reindex backup is retained and causes Conflict, requiring operator care.
+    QCoro::Task<Result<void>> removeSource(NamespaceId ns);
     QCoro::Task<Result<ReadOnlyNamespaceConfig>> sourceConfig(NamespaceId ns);
     QCoro::Task<Result<FileInfo>> stat(NamespaceId ns, QUuid id, AccessContext access) override;
     QCoro::Task<Result<FileInfo>> lookup(NamespaceId ns, QString path, AccessContext access) override;

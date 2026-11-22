@@ -850,6 +850,7 @@ QCoro::Task<Result<void>> ManagedStorage::shutdown() {
         co_return shutdown_error_ ? Result<void>{*shutdown_error_} : Result<void>{};
     }
     shutdown_requested_ = true;
+    emit shutdownStarted();
     preview_stop_.request_stop();
     while (active_ || !avatar_queue_.isEmpty() || initializing_) co_await qCoro(this, &ManagedStorage::drained);
     if (ready_) co_await collectGarbage();

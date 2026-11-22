@@ -118,6 +118,11 @@ run cmake -S "$project_dir" -B "$test_build_dir" -DCMAKE_BUILD_TYPE=Debug "$@" \
 # temporary_artifacts covers private publication, lease isolation and recovery.
 # storage_pool covers shared capacity admission, reservation recovery and owner locks.
 # readonly_filemanager covers external sources, exclusion/authorization alias
+# share_mounts covers identity assignments, mount CRUD, confinement, persistence and QML.
+# readonly_resources covers global registration/status/removal, persistence,
+# overlap/exclusion validation and the production QML storage dialog/model.
+# storage_diagnostics checks TRACE failure sites, schema/limit validation,
+# SQL preparation errors/native codes and redaction of catalog values.
 # guards, snapshot leases, quotas, paging and replacement races. Bind-mount
 # checks use unshare only when private user/mount namespaces are available.
 # readonly_million_entry_paging has its own 1800-second deadline and reports a

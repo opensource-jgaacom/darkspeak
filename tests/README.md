@@ -214,6 +214,21 @@ and corrupted prefixes rewind before full-hash-verified publication. See
 [transfer-error scenarios](mcp/scenarios/003-file-decisions-and-corruption.md).
 
 
+`storage_diagnostics` (30-second timeout) verifies TRACE diagnostics for rejected
+catalog schema versions, missing/invalid persisted limits and SQL preparation
+failures, including native codes and failure source locations. Private catalog
+values stay out of diagnostics; a current catalog still reopens normally.
+
+`readonly_resources` (60-second timeout, offscreen/software rendering) compiles
+the standalone administration model and its backend/VFS dependencies without
+building the application target. It covers registration without sharing, bounded
+asynchronous status, canonical/alias/ancestor root overlap, exclusions and policy
+validation, persisted reopen, dependency/authorization refusal, index removal
+without source deletion, external overlap quarantine, corrupt configuration,
+event-loop responsiveness, and the production QML dialog using the same model.
+The full runner automatically builds and discovers this test. No production or
+test-MCP API is added; the reusable model/service harness exercises its commands.
+
 `readonly_filemanager` covers the external read-only backend, raw Linux names,
 startup/restart reconciliation, partial-scan safety, Cached/Rehash/Snapshot
 preparation, staged resume/expiry, resource quotas, subscription pins, opaque
@@ -268,3 +283,5 @@ publication and final acknowledgement. It also exchanges a complete payload
 between real sender/receiver channels, exercises clipped chunks after a short
 paused prefix, and retries the final chunk after publication.
 Both use isolated private SQLite journals and process-kill fault injection.
+
+`share_mounts` (60 s, offscreen) exercises the reusable identity mount editor: subtree assignment, mount creation/move/removal, restart, dependency refusal, invalid identity/path rejection, no implicit contact access and the production QML dialog. The all-tests runner discovers it through CTest.

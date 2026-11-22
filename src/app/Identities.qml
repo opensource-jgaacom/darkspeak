@@ -145,6 +145,13 @@ Page {
             currentIdentity.changeTransport();
         }
 
+        function openFileShare() {
+            shareMounts.selectIdentity(currentIdentity.uuid);
+            var component = Qt.createComponent("qrc:/ShareMountDialog.qml");
+            var dlg = component.createObject(mainWindow, { "parent": mainWindow });
+            dlg.open();
+        }
+
         function editCurrent() {
             var component = Qt.createComponent("qrc:/EditIdentityDialog.qml");
             var dlg = component.createObject(mainWindow, {
@@ -209,6 +216,12 @@ Page {
         //     icon.name: "edit-copy"
         //     onTriggered: list.copyHandle()
         // }
+
+        MenuItem {
+            text: qsTr("FileShare…")
+            enabled: !shareMounts.busy
+            onTriggered: list.openFileShare()
+        }
 
         MenuItem {
             text: qsTr("Edit")

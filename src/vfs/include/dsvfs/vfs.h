@@ -149,6 +149,8 @@ class Vfs final : public QObject {
                                    dsfm::SymlinkPolicy symlinks = dsfm::SymlinkPolicy::Never,
                                    QUuid owner_identity = {});
     QCoro::Task<Result<StorageResource>> addResource(StorageResource resource, Request admin);
+    // Refuses every assignment/mount dependency; never cascades or deletes data.
+    QCoro::Task<Result<void>> unregisterReadOnlyNamespace(dsfm::NamespaceId ns, Request admin);
     QCoro::Task<Result<StorageAssignment>> assignStorage(StorageAssignment assignment, Request admin);
     QCoro::Task<Result<void>> withdrawAssignment(QUuid assignment, Request admin);
     Result<QVector<StorageResource>> resources() const;

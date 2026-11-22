@@ -45,7 +45,7 @@ public:
     dsfm::TransferProgressStore &transferProgress() { return *transfer_progress_; }
     // Application-wide external-source backend. Hosts supply requester contexts;
     // opening a source never grants a contact access to it.
-    dsfm::IFileManager* readOnlyManager() { return readonly_manager_.get(); }
+    dsfm::ReadOnlyFileManager* readOnlyManager() { return readonly_manager_.get(); }
     QCoro::Task<dsfm::Result<dsfm::NamespaceInfo>> openReadOnlySource(dsfm::ReadOnlyNamespaceConfig config, bool create);
     QCoro::Task<dsfm::Result<void>> closeReadOnlySource(dsfm::NamespaceId ns);
     QCoro::Task<dsfm::Result<void>> updateReadOnlyExclusions(dsfm::NamespaceId ns, dsfm::ExclusionPolicy policy);
@@ -69,6 +69,7 @@ public:
     static QString identityAvatar(QUuid id);
     static QString contactAvatar(QUuid id);
 signals:
+    void shutdownStarted();
     void vfsConflictDetected(QUuid identity, QByteArray key, QString virtual_location);
     void vfsConflictResolved(QUuid identity, QByteArray key);
     void initialized();

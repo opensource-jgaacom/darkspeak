@@ -2339,6 +2339,33 @@ Result<QVector<MountDefinition>> Vfs::definitions(QUuid identity) const {
             output.append(d);
     return output;
 }
+QCoro::Task<Result<void>> Vfs::unregisterReadOnlyNamespace(NamespaceId ns, Request admin) {
+    auto self = impl_;
+    auto available = self->available();
+    if (!available) co_return available.error();
+    if (self->changing || committing(self)) co_return err(ErrorCode::Busy);
+    self->changing = true;
+    auto guard = qScopeGuard([self] { self->changing = false; });
+    auto held = permit(self, {{}, {}, ns, {}}, Operation::ConfigureMounts, admin);
+    if (!held) co_return held.error();
+    if (ns.isNull()) co_return err(ErrorCode::InvalidArgument);
+    auto next = std::make_shared<Configuration>(*self->config.load());
+    auto backend = next->backends.value(ns);
+    if (!backend.owner_identity.isNull()) co_return err(ErrorCode::PermissionDenied);
+    QSet<QUuid> resources;
+    for (const auto &resource : next->resources) {
+        if (resource.namespace_id != ns) continue;
+        if (!resource.owner_identity.isNull()) co_return err(ErrorCode::PermissionDenied);
+        resources.insert(resource.id);
+    }
+    for (const auto &assignment : next->assignments)
+        if (resources.contains(assignment.resource)) co_return err(ErrorCode::Busy);
+    for (const auto &mount : next->mounts)
+        if (mount.mount.namespace_id == ns) co_return err(ErrorCode::Busy);
+    next->resources.removeIf([&](const StorageResource &resource) { return resources.contains(resource.id); });
+    next->backends.remove(ns);
+    co_return co_await self->publish(next);
+}
 QCoro::Task<Result<StorageResource>> Vfs::addResource(StorageResource resource, Request admin) {
     auto self = impl_;
     auto available = self->available();
