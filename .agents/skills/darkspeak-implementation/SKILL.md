@@ -21,6 +21,16 @@ Use when implementing or reviewing a task from a DarkSpeak worklist. **`agents.m
 - Treat the repository, checked-in specs and test evidence as authoritative. Conversation summaries and subagent reports are navigation aids, not proof. Compact when needed; prefer a **new session after a checklist item** over carrying a growing chat into another milestone.
 - Avoid verbose thinking artifacts, duplicate spec summaries, full test output, huge diffs, unrelated code reviews and speculative plans. Store durable decisions/checklist evidence in the repository, not only in chat.
 
+## Compiler, linker and test output: strict context budget
+
+- **Never stream an entire build, compiler, linker, CTest or test-runner log into model context by default.** Preserve full stdout/stderr outside the conversation in a private temporary log (or Context Mode when suitable), with exit status and command line recorded. Do not truncate the underlying captured evidence.
+- First inspect only: process exit status; pass/fail/skip counts; failing test names; the earliest actionable compiler/linker errors; and short, targeted excerpts around failures. If successful, a terse summary is sufficient.
+- Prefer quiet build/test flags and redirect verbose output to the retained log. For example, for **permitted** focused test runs: `ctest --test-dir <build-dir> -R '<focused-pattern>' --output-on-failure > /tmp/<unique-test-log> 2>&1; rc=$?; ...`. Report `rc` and a bounded failure summary; inspect specific sections only if needed. Do not accidentally mask the command's original exit code through a pipe, `tee`, or follow-up filter.
+- For many duplicate diagnostics, group by root cause and inspect representative errors, not every repeated line. For a failing test, inspect its failure excerpt and relevant backtrace; fetch more log context **on demand**, with narrow line ranges or Context Mode queries.
+- Never pass unfiltered logs through Context Mode or other external tools when they may contain secrets, identifiers, payloads or private paths; sanitize or keep them local. Context Mode is optional, not an excuse to leak data.
+- Avoid repeatedly running the same expensive tests without a relevant change. Run the narrowest authorized test first; save one concise evidence summary per completed checklist item. **The existing `agents.md` restriction remains binding: no application compilation unless the owner authorizes it; only new tests may be compiled under its stated exception.**
+- This rule concerns **what enters model context**, not what diagnostics are retained. Never conceal failing tests, compiler errors or incomplete coverage in the final report.
+
 ## Implement one bounded increment
 
 1. State the minimal change and finite acceptance checks. Reuse established C++/Qt/QCoro models, VFS/FileManager and the single coroutine-owned transfer engine. Do not add alternate ownership, a second transfer queue, compatibility branches, or unapproved dependencies.
