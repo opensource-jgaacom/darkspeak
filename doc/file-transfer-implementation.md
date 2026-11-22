@@ -66,7 +66,7 @@ Current status: direction migrations, controller retirement and the relevant reg
 
 ## NEXT MILESTONES — NOT ACTIVE
 
-Order: **FileShare normal administration UI** (`specs/ftp/fileshare_ui.md`, including its storage/VFS/group/permission foundations) → **application metrics** (`specs/metrics.md`) → **application-wide transfer queue + UI** (`specs/transfer_queue.md`, `specs/transfer_queue_ui.md`) → **remaining FTP server, browser, uploads, credits** (specification discussions to continue) → **first-class dashboard last**. Wizard later. Sections 3–7 below are deferred requirements, **not** tasks to complete during the generic refactor. Do not implement unspecified features just to tick boxes.
+Order: **FileShare normal administration UI** (`specs/ftp/fileshare_ui.md`, including its storage/VFS/group/permission foundations) → **application metrics** (`specs/metrics.md`) → **application-wide transfer queue + UI** (`specs/transfer_queue.md`, `specs/transfer_queue_ui.md`) → **remaining FTP server and interactive browser** (`specs/ftp/fileshare_server.md`, `specs/ftp/fileshare_browser.md`) → **FTP uploads** (`specs/ftp/fileshare_uploads.md`) → **optional credits** (`specs/ftp/fileshare_credits.md`) → **first-class dashboard last**. Wizard later. Sections 3–7 below are deferred requirements, **not** tasks to complete during the generic refactor. Do not implement unspecified features just to tick boxes.
 
 ## 3. Storage and VFS recovery audit — DEFERRED (UI prerequisites / later FTP)
 
