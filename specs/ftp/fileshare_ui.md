@@ -1,7 +1,7 @@
 # DarkSpeak — FileShare Administration UI
 
 **Status:** Implementation specification (normal administration UI, phase 1).  
-**Scope:** Local administrator configuration of application-wide read-only storage, identity-owned mutable storage, identity/group/contact VFS mounts, permissions and policies, group membership, upload approvals and exchange-credit administration. **Excludes** the first-run/share wizard, first-class dashboard, remote file browser, and transfer-queue view; these will have separate specifications. Do not substitute placeholders for functions in this scope.
+**Scope:** Local administrator configuration of application-wide read-only storage, identity-owned mutable storage, identity/group/contact VFS mounts, permissions and policies, group membership, upload approvals and exchange-credit administration. **Excludes** the first-run/share wizard, first-class dashboard, remote file browser (`fileshare_browser.md`), and transfer-queue view; these have separate specifications or later milestones. Do not substitute placeholders for functions in this scope.
 
 ## 1. Contracts, architecture and navigation
 
