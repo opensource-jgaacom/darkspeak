@@ -70,8 +70,13 @@ qt_add_qml_module(${PROJECT_NAME}
         EditUploadFileDialog.qml
         TorSettings.qml
         SettingsDialog.qml
+        StorageSettings.qml
         PathsSettings.qml
+        SharePermissionsDialog.qml
         ShareMountDialog.qml
+        Transfers.qml
+        FileBrowser.qml
+        FileBrowserDialog.qml
         ReadOnlyStorageDialog.qml
         LogSettings.qml
         RoundedImage.qml

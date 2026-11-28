@@ -156,6 +156,8 @@ QCoro::Task<dsfm::Result<void>> OutgoingTransfer::offer() {
     if (preview_ && file_->getContact()->canSendFileType("image/jpeg", "preview.jpg")) {
         auto preview_key = preview_->checkpointKey(); if (!preview_key) co_return preview_key.error();
         auto &manager = DsEngine::instance().transfers();
+        if (!manager.bindWork(preview_, TransferPurpose::Preview)) co_return dsfm::Error{dsfm::ErrorCode::QueueFull};
+        if (!manager.acceptWork(*preview_)) co_return dsfm::Error{dsfm::ErrorCode::PermissionDenied};
         if (!manager.find(preview_key.value())) {
             auto admitted = manager.submit(std::make_shared<OutgoingTransfer>(preview_, peer_, OutgoingTransferStart::ManifestMember));
             if (!admitted) co_return admitted.error();
@@ -335,6 +337,32 @@ TransferSession::Outcome OutgoingTransfer::sourceError(dsfm::Error error, bool p
     return {Outcome::Kind::Paused, pause};
 }
 
+QCoro::Task<bool> OutgoingTransfer::pauseAtCheckpoint() {
+    // Only the sender can fence the next payload window. The receiver keeps
+    // draining until this exact, mutually persisted checkpoint is announced.
+    if (!persistCooperativeResume()) { stop(Stop::ResourceUnavailable); co_return false; }
+    auto &journal = DsEngine::instance().getFileManager()->storage().transferProgress();
+    auto saved = co_await journal.pause(key(), attempt(), dsfm::TransferPauseReason::FeaturePaused);
+    if (!saved || !current()) co_return false;
+    setDeadline(QDeadlineTimer{30000});
+    peer_->sendCooperativePause(file_->getFileId(), attempt(), last_, 3);
+    while (current()) {
+        auto event = co_await nextEvent();
+        if (!event || !current()) break;
+        if (redundant(*event)) continue;
+        if (event->kind == Event::Kind::Ack && acknowledge(*event)) continue;
+        if (event->kind == Event::Kind::Pause && event->sequence == 4 && event->checkpoint == last_) {
+            cooperative_paused_ = true;
+            completeCooperativePause();
+            qDebug() << "Transfer cooperative pause confirmed at durable boundary";
+            co_return true;
+        }
+        peer_->close();
+        stop(Stop::Disconnected);
+    }
+    co_return false;
+}
+
 QCoro::Task<TransferSession::Outcome> OutgoingTransfer::execute() {
     auto &storage = DsEngine::instance().getFileManager()->storage();
     operation_.emplace(storage.holdOperation());
@@ -402,6 +430,17 @@ QCoro::Task<TransferSession::Outcome> OutgoingTransfer::execute() {
             co_return sourceError(checked.error(), true);
         }
         if (!current()) break;
+        // Read/hash awaits may have yielded to chat or another payload owner.
+        // Retain this bounded chunk and hash it exactly once while waiting.
+        setDeadline(QDeadlineTimer{30000});
+        while (current() && !peer_->transferWritable()) {
+            auto event=co_await nextEvent();
+            if (!event || !current()) break;
+            if (redundant(*event)) continue;
+            if (!acknowledge(*event)) { peer_->close(); stop(Stop::Disconnected); break; }
+        }
+        setDeadline(QDeadlineTimer{QDeadlineTimer::Forever});
+        if (!current()) break;
         if (!window.admit(offset_, quint64(count))) throw std::logic_error("Checkpoint payload fence violated");
         const auto sequence = next_sequence_++;
         const auto offset = offset_;
@@ -421,6 +460,12 @@ QCoro::Task<TransferSession::Outcome> OutgoingTransfer::execute() {
             }
             if (!window.confirm(offset_)) throw std::logic_error("Checkpoint confirmation fence violated");
             setDeadline(QDeadlineTimer{QDeadlineTimer::Forever});
+            if (!final && cooperativePausePending()) {
+                if (co_await pauseAtCheckpoint())
+                    co_return Outcome{Outcome::Kind::Paused, dsfm::TransferPauseReason::FeaturePaused};
+                if (!stopped()) stop(Stop::Disconnected);
+                co_return interrupted();
+            }
         }
         if (final) {
             setDeadline(QDeadlineTimer{30000});
@@ -461,14 +506,37 @@ QCoro::Task<TransferSession::Outcome> OutgoingTransfer::finalize(Outcome result)
         file_->projectTransferOutcome(saved.value().description.interval, dsfm::TransferPauseReason::None, dsfm::TransferFailureReason::None, File::FS_DONE);
         co_return Outcome{Outcome::Kind::Completed};
     }
+    if (stopped() && result.kind != Outcome::Kind::Failed) result = interrupted();
     if (saved.value().failure != dsfm::TransferFailureReason::None && saved.value().failure != result.failure)
         result = {Outcome::Kind::Failed, dsfm::TransferPauseReason::None, saved.value().failure};
-    const bool terminal = result.kind == Outcome::Kind::Failed || result.kind == Outcome::Kind::Cancelled || result.kind == Outcome::Kind::Rejected;
-    dsfm::Result<void> recorded;
-    if (terminal && saved.value().failure == dsfm::TransferFailureReason::None)
-        recorded = co_await storage.transferProgress().fail(key(), result.failure, saved.value().attempt);
-    else if (!terminal) recorded = co_await storage.transferProgress().pause(key(), saved.value().attempt, result.pause);
-    if (!recorded) throw std::runtime_error("Transfer outcome could not be persisted");
+    bool terminal = false;
+    auto recorded_failure = saved.value().failure;
+    bool settled_stop = false;
+    for (int pass = 0; pass != 4; ++pass) {
+        terminal = result.kind == Outcome::Kind::Failed || result.kind == Outcome::Kind::Cancelled || result.kind == Outcome::Kind::Rejected;
+        dsfm::Result<void> recorded;
+        if (terminal && recorded_failure == dsfm::TransferFailureReason::None) {
+            recorded = co_await storage.transferProgress().fail(key(), result.failure, saved.value().attempt);
+            if (recorded) recorded_failure = result.failure;
+        } else if (!terminal) {
+            recorded = co_await storage.transferProgress().pause(key(), saved.value().attempt, result.pause);
+        }
+        if (!recorded) throw std::runtime_error("Transfer outcome could not be persisted");
+        auto latest = stopped() && !terminal ? interrupted() : result;
+        if (recorded_failure != dsfm::TransferFailureReason::None && latest.failure != recorded_failure)
+            latest = {Outcome::Kind::Failed, dsfm::TransferPauseReason::None, recorded_failure};
+        if (latest.kind == result.kind && latest.pause == result.pause && latest.failure == result.failure) {
+            settled_stop = true;
+            break;
+        }
+        // Late cancellation/revocation strengthens a voluntary pause. Commit
+        // that outcome before projecting it or suppressing the final notice.
+        result = latest;
+    }
+    if (!settled_stop) throw std::runtime_error("Transfer stop did not stabilize during finalization");
+    if (!(result.kind == Outcome::Kind::Paused && result.pause == dsfm::TransferPauseReason::FeaturePaused) &&
+        !persistCooperativeResume(false))
+        throw std::runtime_error("Overridden cooperative pause resume preference could not be cleared");
     if (result.kind != Outcome::Kind::Offered)
         file_->projectTransferOutcome(saved.value().description.interval, terminal ? dsfm::TransferPauseReason::None : result.pause,
             terminal ? result.failure : dsfm::TransferFailureReason::None,
@@ -483,7 +551,9 @@ QCoro::Task<TransferSession::Outcome> OutgoingTransfer::finalize(Outcome result)
                 else peer_->sendFileCancel(file_->getFileId(), reason);
             } else if (!terminal && result.kind != Outcome::Kind::Offered) {
                 if (resume_request_) peer_->sendCheckpointResumeResult(*resume_request_, file_->getFileId(), FileResumeStatus::Paused, {}, result.pause);
-                else if (selected_ && file_->getChannel()) peer_->sendFilePause(file_->getFileId(), attempt(), last_, result.pause);
+                else if (selected_ && file_->getChannel() &&
+                         (!cooperative_paused_ || result.pause != dsfm::TransferPauseReason::FeaturePaused))
+                    peer_->sendFilePause(file_->getFileId(), attempt(), last_, result.pause);
             }
         } catch (...) {}
     }

@@ -110,6 +110,8 @@ private slots:
     void onServiceStopped(const QUuid& id);
 
 signals:
+    // Authenticated certificate is available; install feature handlers before capabilities.
+    void preparingPeerFeatures(const std::shared_ptr<ds::core::PeerConnection>& peer);
 #ifdef DARKSPEAK_WITH_TEST_MCP
     // Wire metadata only; no bio text, hashes or credentials cross this signal.
     void testBioWireQueued(const ds::core::PeerConnection* peer, bool response,

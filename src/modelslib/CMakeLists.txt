@@ -1,6 +1,14 @@
 project(models LANGUAGES CXX)
 
 add_library(${PROJECT_NAME} STATIC
+    include/ds/transferqueuemodel.h
+    src/transferqueuemodel.cpp
+    src/transferqueueapplication.cpp
+    include/ds/browseprovider.h
+    include/ds/filebrowsermodel.h
+    src/browseprovider.cpp
+    src/browserapplication.cpp
+    src/filebrowsermodel.cpp
     include/ds/notificationsmodel.h
     include/ds/logfiltermodel.h
     src/logfiltermodel.cpp

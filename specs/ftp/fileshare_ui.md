@@ -10,7 +10,7 @@ Authoritative behavior is defined by `../file_manager.md`, `../read_only_file_ma
 **C++ owns all application and UI state**, data models, selection identity, navigation context, edited/draft values, validation, calculations, sorting/filtering, authorization/provenance, async operations, error reporting and persistence. QML presents the models, forwards user events/commands, controls focus and animation, and performs only trivial visual geometry calculations. Do not implement policy or wizard logic, storage computation, command availability, business formatting, timers that poll services, or derived status in QML. C++ models must be usable and testable without constructing QML. The normal UI is authoritative; a future wizard will call the same commands.
 
 Provide discoverable entry points in the existing identity and contact administration:
-- **Application settings → Read-only storage** opens the global storage management dialog.
+- **Application settings → Storage → Read-only storage** opens the global storage management dialog.
 - **Identity → Mutable storage** opens that identity's managed storage dialog (current identity selected by default).
 - **Identity → FileShare** opens the shared mount/permission editor in identity mode.
 - **Identity → Groups** manages identity-scoped groups and opens the same editor in group mode.
@@ -23,6 +23,8 @@ Every displayed operation has a C++ command/result and an authenticated **test-M
 ## 2. Global read-only storage dialog
 
 List all **application-wide registered read-only resources**, shared across local identities but never made remotely visible merely by registration. For each row expose stable resource/name, canonical local path (local administration only), backend/type, indexing/reconciliation state and progress, hash strategy (`Cached`, `Rehash`, `Snapshot`), symlink policy, size/object counts when available, last checked, errors, identity assignments and mount-reference counts. Use bounded asynchronous listing/filtering; local paths never enter remote metadata or public metrics.
+
+The compact list shows name, canonical path, indexed available-file count and total indexed file bytes (decimal compact units, e.g. `100m`, `1.7t`). Counts may be partial while indexing and unavailable values display as unknown. Background polling keeps existing rows, selection and controls stable: use insert/remove notifications only for registration changes and role-specific data notifications only when field values change. Add, Delete and Edit controls sit below the list. An omitted name defaults to the source directory name. The current editor supports persistent display-name changes; path and indexing policies remain registration-time settings and are shown for inspection. Removing registration never deletes source files.
 
 Actions:
 - **Add existing directory:** browse/select local directory, name/validate, choose supported hash and symlink settings, review private data/exclusions, register and start bounded low-priority indexing. If a physical source is already registered, reject duplicate registration and identify the existing resource.

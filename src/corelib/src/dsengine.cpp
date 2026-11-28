@@ -550,11 +550,13 @@ void DsEngine::initialize()
     events_ = std::make_unique<EventJournal>(getDb(), *settings_);
 
     transfers_ = new TransferManager(this);
+    if (!transfers_->openWorkStore(getDb())) throw Error("Cannot open durable transfer work registry");
     fileManager_ = new FileManager(*this, *settings_);
     identityManager_ = new IdentityManager(*this);
     contactManager_ = new ContactManager(*this);
     conversationManager_ = new ConversationManager(*this);
     messageManager_ = new MessageManager(*this);
+    QTimer::singleShot(0, transfers_, [manager = transfers_] { manager->restoreWork(); });
 }
 
 void DsEngine::setState(DsEngine::State state)

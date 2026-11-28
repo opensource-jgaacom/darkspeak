@@ -5,11 +5,6 @@ import QtQuick.Layouts
 ColumnLayout {
     property var settings: settingsSession.values
     spacing: 10 * appearance.factor
-    Button {
-        text: qsTr("Read-only storage…")
-        onClicked: storageDialog.open()
-    }
-    ReadOnlyStorageDialog { id: storageDialog }
     function commit() {
         settings.dbpath = database.text;
         settings.downloadLocation = download.text;

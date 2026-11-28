@@ -2110,3 +2110,17 @@ QCoro::Task<Result<AccessContext>> IFileManager::descendantAccess(NamespaceId ns
     co_return access;
 }
 }
+
+namespace dsfm {
+QCoro::Task<Result<QByteArray>> IFileManager::directoryIdentity(NamespaceId, DirectoryId, AccessContext) {
+    co_return Error{ErrorCode::UnsupportedCapability};
+}
+QCoro::Task<Result<QByteArray>> NativeFileManager::directoryIdentity(NamespaceId ns, DirectoryId directory, AccessContext access) {
+    // Managed directories have unique catalog identities and no filesystem aliases.
+    auto info = co_await IFileManager::stat(ns, directory, access);
+    if (!info) co_return info.error();
+    if (info.value().type != EntryType::Directory) co_return Error{ErrorCode::InvalidArgument};
+    if (!access.current()) co_return Error{ErrorCode::MissingEntry};
+    co_return QByteArray("managed-directory:") + ns.toRfc4122() + directory.toRfc4122();
+}
+}

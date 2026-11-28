@@ -46,11 +46,8 @@ ConnectionSocket::ConnectionSocket(QByteArray host,
 
         Q_UNUSED(bytes)
 
-        if (outData.isEmpty()) {
-            emit outputBufferEmptied();
-        } else {
-            sendMore();
-        }
+        if (!outData.isEmpty()) sendMore();
+        if (queuedBytes() == 0) emit outputBufferEmptied();
     });
 
     LFLOG_TRACE << "Socket is constructed: " << uuid.toString();

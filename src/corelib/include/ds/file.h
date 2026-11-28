@@ -98,6 +98,8 @@ public:
     QByteArray getFileId() const noexcept;
     State getState() const noexcept;
     bool isResumable() const noexcept;
+    bool recoveryValidated() const noexcept { return recovery_validated_; }
+    bool recoveryPending() const noexcept { return recovery_pending_; }
     int pauseReason() const noexcept { return int(dataPauseReason()); }
     int failureReason() const noexcept;
     QString pauseReasonText() const;
@@ -200,6 +202,7 @@ public:
     void transferFailed(const QString& reason, const State state = FS_CANCELLED);
 
 signals:
+    void recoveryFinished();
     void durableCheckpointConfirmed(dsfm::DurableCheckpoint checkpoint);
     void sourceIntegrityFailed();
     void stateChanged();
@@ -214,6 +217,8 @@ signals:
     void previewChanged();
 
 private:
+    bool recovery_pending_ = false;
+    bool recovery_validated_ = false;
     friend class IncomingTransfer;
     static QString getSelectStatement(const QString& where);
     static ptr_t load(QObject& parent, const std::function<void(QSqlQuery&)>& prepare);

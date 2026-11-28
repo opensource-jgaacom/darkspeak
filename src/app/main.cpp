@@ -34,14 +34,23 @@
 #include "ds/messagesmodel.h"
 #include "ds/message.h"
 #include "ds/filesmodel.h"
+#include "ds/filebrowsermodel.h"
+#include "ds/transferqueuemodel.h"
 #include "ds/imageprovider.h"
 #include "ds/identitynamevalidator.h"
 #include "ds/torprotocolmanager.h"
 #include "ds/logutil.h"
 #include "ds/avatarutil.h"
 #include "ds/filemanager.h"
+#include "ds/fileshareservice.h"
+#include "ds/remotecatalogs.h"
+#include "ds/peer.h"
 #include "ds/readonlyresources.h"
 #include "ds/sharemounts.h"
+#include "ds/sharepermissions.h"
+#include "ds/contactmanager.h"
+#include <QSqlQuery>
+#include <QSqlError>
 #include "filedialogmodel.h"
 #include "desktop_integration.h"
 #include "video_preview_support.h"
@@ -336,6 +345,7 @@ int main(int argc, char *argv[])
 
     qmlRegisterType<ds::core::QmlIdentityReq>("org.darkspeak", 1, 0, "QmlIdentityReq");
     qmlRegisterType<ds::models::IdentityNameValidator>("org.darkspeak", 1, 0, "IdentityNameValidator");
+    qmlRegisterType<ds::models::FileBrowserModel>("org.darkspeak", 1, 0, "FileBrowserModel");
 
     Appearance appearance;
     LFLOG_DEBUG << "Qt Quick Controls style: " << QQuickStyle::name();
@@ -373,6 +383,7 @@ int main(int argc, char *argv[])
     };
     storage_host.close = [&storage](dsfm::NamespaceId ns) { return storage.closeReadOnlySource(ns); };
     storage_host.info = [&storage](dsfm::NamespaceId ns) { return storage.readOnlyManager()->namespaceInfo(ns); };
+    storage_host.usage = [&storage](dsfm::NamespaceId ns) { return storage.readOnlyManager()->sourceUsage(ns); };
     storage_host.config = [&storage](dsfm::NamespaceId ns) { return storage.readOnlyManager()->sourceConfig(ns); };
     storage_host.remove = [&storage](dsfm::NamespaceId ns) -> QCoro::Task<dsfm::Result<void>> {
         auto vfs = co_await storage.openVfs();
@@ -403,6 +414,83 @@ int main(int argc, char *argv[])
     auto *share_mounts = new ds::core::ShareMounts(std::move(mounts_host), &storage);
     QObject::connect(&storage, &ds::core::ManagedStorage::shutdownStarted, share_mounts, &ds::core::ShareMounts::stop);
     engine.rootContext()->setContextProperty("shareMounts", share_mounts);
+    ds::core::SharePermissions::Host permissions_host;
+    permissions_host.hold = [&storage] { return std::make_shared<ds::core::ManagedStorage::Operation>(storage.holdOperation()); };
+    permissions_host.identityExists = [](QUuid id) { return DsEngine::instance().getIdentityManager()->identityFromUuid(id) != nullptr; };
+    permissions_host.contactExists = [](QUuid identity, QUuid contact) {
+        auto owner = DsEngine::instance().getIdentityManager()->identityFromUuid(identity);
+        if (!owner) return false;
+        QSqlQuery query;
+        query.prepare("SELECT 1 FROM contact WHERE identity=:identity AND uuid=:contact");
+        query.bindValue(":identity", owner->getId()); query.bindValue(":contact", contact);
+        return query.exec() && query.next();
+    };
+    permissions_host.contacts = [](QUuid identity, QString filter, int page) -> dsfm::Result<QVariantList> {
+        auto owner = DsEngine::instance().getIdentityManager()->identityFromUuid(identity);
+        if (!owner) return dsfm::Error{dsfm::ErrorCode::PermissionDenied};
+        QSqlQuery query;
+        query.prepare("SELECT uuid,name FROM contact WHERE identity=:identity AND instr(lower(name),lower(:filter))>0 ORDER BY name,uuid LIMIT 101 OFFSET :offset");
+        query.bindValue(":identity", owner->getId()); query.bindValue(":filter", filter); query.bindValue(":offset", page * 100);
+        if (!query.exec()) {
+            LFLOG_TRACE << "FileShare contacts SELECT failed native=" << query.lastError().nativeErrorCode();
+            return dsfm::Error{dsfm::ErrorCode::IoError};
+        }
+        QVariantList rows;
+        while (query.next()) rows.append(QVariantMap{{"id", query.value(0).toUuid().toString(QUuid::WithoutBraces)}, {"name", query.value(1).toString()}});
+        return rows;
+    };
+    permissions_host.open = [&storage] { return storage.openVfs(); };
+    const auto permissions_root = QDir(QFileInfo(DsEngine::instance().settings().value("dbpath").toString()).absolutePath()).filePath("identity-access-v1");
+    auto *share_permissions = new ds::core::SharePermissions(permissions_root, std::move(permissions_host), &storage);
+    QObject::connect(&storage, &ds::core::ManagedStorage::shutdownStarted, share_permissions, &ds::core::SharePermissions::stop);
+    QObject::connect(DsEngine::instance().getContactManager(), &ds::core::ContactManager::contactDeleted, share_permissions, &ds::core::SharePermissions::invalidate);
+    QObject::connect(DsEngine::instance().getIdentityManager(), &QAbstractItemModel::rowsAboutToBeRemoved, share_permissions, &ds::core::SharePermissions::invalidate);
+    engine.rootContext()->setContextProperty("sharePermissions", share_permissions);
+
+    ds::prot::FileShareService::Host remote_host;
+    remote_host.hold = [&storage] { return std::make_shared<ds::core::ManagedStorage::Operation>(storage.holdOperation()); };
+    remote_host.open = [&storage] { return storage.openVfs(); };
+    remote_host.request = [share_permissions](QUuid identity, QUuid contact) -> QCoro::Task<dsfm::Result<dsvfs::Request>> {
+        auto loaded = co_await share_permissions->load(identity);
+        if (!loaded) co_return loaded.error();
+        co_return share_permissions->requestFor(identity, contact);
+    };
+    remote_host.enabled = [](QUuid identity) {
+        return DsEngine::instance().getIdentityManager()->identityFromUuid(identity) &&
+            DsEngine::instance().settings().value(QStringLiteral("identity/%1/fileShareEnabled")
+                .arg(identity.toString(QUuid::WithoutBraces)), false).toBool();
+    };
+    remote_host.enable = [](QUuid identity, bool enabled) {
+        if (!DsEngine::instance().getIdentityManager()->identityFromUuid(identity)) return;
+        DsEngine::instance().settings().setValue(QStringLiteral("identity/%1/fileShareEnabled")
+            .arg(identity.toString(QUuid::WithoutBraces)), enabled);
+    };
+    // The identity's explicit remote enable switch is the local admission policy;
+    // the service additionally checks EXPORT/LIST/RECURSE and current budgets.
+    remote_host.approve_recursion = [](QUuid identity, QUuid, const QString &) {
+        return DsEngine::instance().settings().value(QStringLiteral("identity/%1/fileShareEnabled")
+            .arg(identity.toString(QUuid::WithoutBraces)), false).toBool();
+    };
+    auto *file_share_service = new ds::prot::FileShareService(std::move(remote_host), &storage);
+    QObject::connect(&storage, &ds::core::ManagedStorage::shutdownStarted, file_share_service, &ds::prot::FileShareService::stop);
+    QObject::connect(&DsEngine::instance(), &DsEngine::preparingPeerFeatures, file_share_service,
+        [file_share_service](const std::shared_ptr<ds::core::PeerConnection> &connection) {
+            auto peer = std::dynamic_pointer_cast<ds::prot::Peer>(connection);
+            auto identity = DsEngine::instance().getIdentityManager()->identityFromUuid(connection->getIdentityId());
+            if (!peer || !identity || !connection->getPeerCert()) return;
+            auto contact = identity->contactFromHash(connection->getPeerCert()->getHash().toByteArray());
+            if (!contact) return;
+            file_share_service->attachContact(peer, contact);
+        });
+    engine.rootContext()->setContextProperty("fileShareService", file_share_service);
+    auto *file_browsers = new ds::models::FileBrowserSources(
+        ds::models::applicationBrowserFactory(storage, *file_share_service), &storage);
+    QObject::connect(&storage, &ds::core::ManagedStorage::shutdownStarted, file_browsers, &ds::models::FileBrowserSources::stop);
+    engine.rootContext()->setContextProperty("fileBrowsers", file_browsers);
+    auto *remote_catalogs = new ds::prot::RemoteCatalogs({}, &storage);
+    remote_catalogs->install(*DsEngine::instance().getFileManager(), *file_share_service);
+    engine.rootContext()->setContextProperty("remoteCatalogs", remote_catalogs);
+
     engine.rootContext()->setContextProperty("videoPreviewSupport", &videoPreviewSupport);
 #ifdef DARKSPEAK_WITH_MCP
     engine.rootContext()->setContextProperty("mcp", mcp_service.get());
@@ -424,6 +512,10 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty("conversations", manager->conversationsModel());
     engine.rootContext()->setContextProperty("messages", manager->messagesModel());
     engine.rootContext()->setContextProperty("files", manager->filesModel());
+    auto &transfer_manager = DsEngine::instance().transfers();
+    auto *transfer_queue = new TransferQueueModel(transfer_manager,
+        applicationTransferReader(transfer_manager), applicationTransferDecision(transfer_manager), &engine);
+    engine.rootContext()->setContextProperty("transferQueue", transfer_queue);
     auto& events = DsEngine::instance().events();
     engine.rootContext()->setContextProperty("events", &events);
     settingsSession.setEventsConfigurator([&events](bool enabled, int precision, bool record_filenames) {

@@ -1,11 +1,11 @@
 # Compile the session framework directly so this focused test does not require
 # building the application or unrelated core services.
 add_executable(transfer_session_test transfer_session_test.cpp
-    ../src/corelib/src/transfersession.cpp ../src/corelib/src/transfermanager.cpp
+    ../src/corelib/src/transfersession.cpp ../src/corelib/src/transfermanager.cpp ../src/corelib/src/transferwork.cpp
     ../src/corelib/include/ds/transfersession.h ../src/corelib/include/ds/transfermanager.h)
 target_compile_features(transfer_session_test PRIVATE cxx_std_20)
 target_include_directories(transfer_session_test PRIVATE ../src/corelib/include ../src/filemanager/include)
-target_link_libraries(transfer_session_test PRIVATE Qt6::Core Qt6::Test QCoro6::Core)
+target_link_libraries(transfer_session_test PRIVATE Qt6::Core Qt6::Sql Qt6::Test QCoro6::Core logfault::logfault)
 add_test(NAME transfer_session COMMAND transfer_session_test)
 set_tests_properties(transfer_session PROPERTIES TIMEOUT 30)
 
@@ -24,6 +24,92 @@ target_link_libraries(protocol_v3_test PRIVATE prot core Qt6::Core Qt6::Test)
 target_compile_definitions(protocol_v3_test PRIVATE DS_CHECKPOINT_WIRE_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 add_test(NAME protocol_v3 COMMAND protocol_v3_test)
 set_tests_properties(protocol_v3 PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(transport_priority_test transport_priority_test.cpp)
+target_compile_features(transport_priority_test PRIVATE cxx_std_20)
+target_link_libraries(transport_priority_test PRIVATE prot core Qt6::Core Qt6::Test)
+add_test(NAME transport_priority COMMAND transport_priority_test)
+set_tests_properties(transport_priority PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(fileshare_protocol_test fileshare_protocol_test.cpp)
+target_compile_features(fileshare_protocol_test PRIVATE cxx_std_20)
+target_link_libraries(fileshare_protocol_test PRIVATE prot core Qt6::Core Qt6::Test)
+target_compile_definitions(fileshare_protocol_test PRIVATE DS_FILESHARE_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+add_test(NAME fileshare_protocol COMMAND fileshare_protocol_test)
+set_tests_properties(fileshare_protocol PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(fileshare_service_test fileshare_service_test.cpp)
+target_compile_features(fileshare_service_test PRIVATE cxx_std_20)
+target_link_libraries(fileshare_service_test PRIVATE prot core Qt6::Core Qt6::Test)
+add_test(NAME fileshare_service COMMAND fileshare_service_test)
+set_tests_properties(fileshare_service PROPERTIES TIMEOUT 60 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(fileshare_recursive_service_test fileshare_recursive_service_test.cpp)
+target_compile_features(fileshare_recursive_service_test PRIVATE cxx_std_20)
+target_link_libraries(fileshare_recursive_service_test PRIVATE prot core Qt6::Core Qt6::Test)
+add_test(NAME fileshare_recursive_service COMMAND fileshare_recursive_service_test)
+set_tests_properties(fileshare_recursive_service PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(fileshare_get_test fileshare_get_test.cpp)
+target_compile_features(fileshare_get_test PRIVATE cxx_std_20)
+target_link_libraries(fileshare_get_test PRIVATE models prot Qt6::Test logfault::logfault)
+add_test(NAME fileshare_get COMMAND fileshare_get_test)
+set_tests_properties(fileshare_get PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(file_browser_test file_browser_test.cpp ../src/app/appearance.cpp ../src/app/appearance.h)
+target_compile_features(file_browser_test PRIVATE cxx_std_20)
+target_include_directories(file_browser_test PRIVATE ../src/app)
+target_compile_definitions(file_browser_test PRIVATE DS_APP_QML="${CMAKE_CURRENT_SOURCE_DIR}/../src/app")
+target_link_libraries(file_browser_test PRIVATE models Qt6::Test Qt6::QuickControls2 logfault::logfault)
+add_test(NAME file_browser COMMAND file_browser_test)
+set_tests_properties(file_browser PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic")
+
+add_executable(browser_navigation_test browser_navigation_test.cpp ../src/app/appearance.cpp ../src/app/appearance.h)
+target_compile_features(browser_navigation_test PRIVATE cxx_std_20)
+target_include_directories(browser_navigation_test PRIVATE ../src/app)
+target_compile_definitions(browser_navigation_test PRIVATE DS_APP_QML="${CMAKE_CURRENT_SOURCE_DIR}/../src/app")
+target_link_libraries(browser_navigation_test PRIVATE models Qt6::Test Qt6::QuickControls2 logfault::logfault)
+add_test(NAME browser_navigation COMMAND browser_navigation_test)
+set_tests_properties(browser_navigation PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic")
+
+add_executable(browser_views_test browser_views_test.cpp ../src/app/appearance.cpp ../src/app/appearance.h)
+target_compile_features(browser_views_test PRIVATE cxx_std_20)
+target_include_directories(browser_views_test PRIVATE ../src/app)
+target_compile_definitions(browser_views_test PRIVATE DS_APP_QML="${CMAKE_CURRENT_SOURCE_DIR}/../src/app")
+target_link_libraries(browser_views_test PRIVATE models Qt6::Test Qt6::QuickControls2 logfault::logfault)
+add_test(NAME browser_views COMMAND browser_views_test)
+set_tests_properties(browser_views PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic")
+
+add_executable(browser_paging_test browser_paging_test.cpp ../src/app/appearance.cpp ../src/app/appearance.h)
+target_compile_features(browser_paging_test PRIVATE cxx_std_20)
+target_include_directories(browser_paging_test PRIVATE ../src/app)
+target_compile_definitions(browser_paging_test PRIVATE DS_APP_QML="${CMAKE_CURRENT_SOURCE_DIR}/../src/app")
+target_link_libraries(browser_paging_test PRIVATE models Qt6::Test Qt6::QuickControls2 logfault::logfault)
+add_test(NAME browser_paging COMMAND browser_paging_test)
+set_tests_properties(browser_paging PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic")
+
+add_executable(browser_smoke_test browser_smoke_test.cpp ../src/app/appearance.cpp ../src/app/appearance.h)
+target_compile_features(browser_smoke_test PRIVATE cxx_std_20)
+target_include_directories(browser_smoke_test PRIVATE ../src/app)
+target_compile_definitions(browser_smoke_test PRIVATE DS_APP_QML=\"${CMAKE_CURRENT_SOURCE_DIR}/../src/app\")
+target_link_libraries(browser_smoke_test PRIVATE models Qt6::Test Qt6::QuickControls2 logfault::logfault)
+add_test(NAME browser_smoke COMMAND browser_smoke_test)
+set_tests_properties(browser_smoke PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic")
+
+add_executable(browser_selection_test browser_selection_test.cpp ../src/app/appearance.cpp ../src/app/appearance.h)
+target_compile_features(browser_selection_test PRIVATE cxx_std_20)
+target_include_directories(browser_selection_test PRIVATE ../src/app)
+target_compile_definitions(browser_selection_test PRIVATE DS_APP_QML="${CMAKE_CURRENT_SOURCE_DIR}/../src/app")
+target_link_libraries(browser_selection_test PRIVATE models Qt6::Test Qt6::QuickControls2 logfault::logfault)
+add_test(NAME browser_selection COMMAND browser_selection_test)
+set_tests_properties(browser_selection PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic")
+
+add_executable(remote_catalogs_test remote_catalogs_test.cpp)
+target_compile_features(remote_catalogs_test PRIVATE cxx_std_20)
+target_link_libraries(remote_catalogs_test PRIVATE prot core Qt6::Core Qt6::Test)
+target_compile_definitions(remote_catalogs_test PRIVATE CATALOG_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/../src/vfs/tests/fixtures/catalog-v2.jsonl")
+add_test(NAME remote_catalogs COMMAND remote_catalogs_test)
+set_tests_properties(remote_catalogs PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(tor_address_test tor_address_test.cpp)
 target_compile_features(tor_address_test PRIVATE cxx_std_17)
@@ -194,3 +280,69 @@ target_compile_definitions(share_mounts_test PRIVATE DS_APP_QML="${CMAKE_CURRENT
 target_link_libraries(share_mounts_test PRIVATE dsvfs Qt6::Test Qt6::Widgets Qt6::Quick Qt6::QuickControls2 logfault::logfault)
 add_test(NAME share_mounts COMMAND share_mounts_test)
 set_tests_properties(share_mounts PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic")
+
+add_executable(share_permissions_test share_permissions_test.cpp
+    ../src/corelib/src/sharepermissions.cpp ../src/corelib/include/ds/sharepermissions.h
+    ../src/corelib/src/sharemounts.cpp ../src/corelib/include/ds/sharemounts.h
+    ../src/app/appearance.cpp ../src/app/appearance.h)
+target_compile_features(share_permissions_test PRIVATE cxx_std_20)
+target_include_directories(share_permissions_test PRIVATE ../src/corelib/include ../src/app)
+target_compile_definitions(share_permissions_test PRIVATE DS_APP_QML="${CMAKE_CURRENT_SOURCE_DIR}/../src/app")
+target_link_libraries(share_permissions_test PRIVATE dsvfs Qt6::Test Qt6::Widgets Qt6::Quick Qt6::QuickControls2 logfault::logfault)
+add_test(NAME share_permissions COMMAND share_permissions_test)
+set_tests_properties(share_permissions PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic")
+
+add_executable(share_administration_test share_administration_test.cpp
+    ../src/corelib/src/readonlyresources.cpp ../src/corelib/include/ds/readonlyresources.h
+    ../src/corelib/src/sharemounts.cpp ../src/corelib/include/ds/sharemounts.h
+    ../src/corelib/src/sharepermissions.cpp ../src/corelib/include/ds/sharepermissions.h
+    ../src/app/appearance.cpp ../src/app/appearance.h)
+target_compile_features(share_administration_test PRIVATE cxx_std_20)
+target_include_directories(share_administration_test PRIVATE ../src/corelib/include ../src/app)
+target_compile_definitions(share_administration_test PRIVATE DS_APP_QML="${CMAKE_CURRENT_SOURCE_DIR}/../src/app")
+target_link_libraries(share_administration_test PRIVATE dsvfs Qt6::Test Qt6::Widgets Qt6::Quick Qt6::QuickControls2 logfault::logfault)
+add_test(NAME share_administration COMMAND share_administration_test)
+set_tests_properties(share_administration PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic")
+
+add_executable(catalog_transfer_test catalog_transfer_test.cpp)
+target_compile_features(catalog_transfer_test PRIVATE cxx_std_20)
+target_link_libraries(catalog_transfer_test PRIVATE models prot Qt6::Test)
+add_test(NAME catalog_transfer COMMAND catalog_transfer_test)
+set_tests_properties(catalog_transfer PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(transfer_work_test transfer_work_test.cpp)
+target_compile_features(transfer_work_test PRIVATE cxx_std_20)
+target_link_libraries(transfer_work_test PRIVATE core prot Qt6::Test)
+target_compile_definitions(transfer_work_test PRIVATE DS_WORK_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/transfer-work-v1.sql")
+add_test(NAME transfer_work COMMAND transfer_work_test)
+set_tests_properties(transfer_work PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(transfer_scheduling_test transfer_scheduling_test.cpp)
+target_compile_features(transfer_scheduling_test PRIVATE cxx_std_20)
+target_link_libraries(transfer_scheduling_test PRIVATE core prot Qt6::Test)
+target_compile_definitions(transfer_scheduling_test PRIVATE DS_WORK_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/transfer-work-v1.sql")
+add_test(NAME transfer_scheduling COMMAND transfer_scheduling_test)
+set_tests_properties(transfer_scheduling PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(transfer_queue_model_test transfer_queue_model_test.cpp ../src/app/appearance.cpp ../src/app/appearance.h)
+target_compile_features(transfer_queue_model_test PRIVATE cxx_std_20)
+target_include_directories(transfer_queue_model_test PRIVATE ../src/app)
+target_compile_definitions(transfer_queue_model_test PRIVATE DS_APP_QML="${CMAKE_CURRENT_SOURCE_DIR}/../src/app")
+target_link_libraries(transfer_queue_model_test PRIVATE models Qt6::Test Qt6::QuickControls2 logfault::logfault)
+add_test(NAME transfer_queue_model COMMAND transfer_queue_model_test)
+set_tests_properties(transfer_queue_model PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic")
+
+add_executable(transfer_preemption_test transfer_preemption_test.cpp)
+target_compile_features(transfer_preemption_test PRIVATE cxx_std_20)
+target_link_libraries(transfer_preemption_test PRIVATE models prot Qt6::Test)
+target_compile_definitions(transfer_preemption_test PRIVATE DS_PAUSE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/cooperative-pause-v1.hex")
+add_test(NAME transfer_preemption COMMAND transfer_preemption_test)
+set_tests_properties(transfer_preemption PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(queue_integration_test queue_integration_test.cpp ../src/app/appearance.cpp ../src/app/appearance.h)
+target_compile_features(queue_integration_test PRIVATE cxx_std_20)
+target_include_directories(queue_integration_test PRIVATE ../src/app)
+target_compile_definitions(queue_integration_test PRIVATE DS_APP_QML="${CMAKE_CURRENT_SOURCE_DIR}/../src/app")
+target_link_libraries(queue_integration_test PRIVATE models prot Qt6::Test Qt6::QuickControls2 logfault::logfault)
+add_test(NAME queue_integration COMMAND queue_integration_test)
+set_tests_properties(queue_integration PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Basic")

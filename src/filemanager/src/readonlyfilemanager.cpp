@@ -672,7 +672,7 @@ void cleanupLeases(Source& source, bool startup = false) {
         struct stat st{};
         if (::fstatat(source.internal.value, name.constData(), &st, AT_SYMLINK_NOFOLLOW) == 0) {
             require(S_ISREG(st.st_mode) && st.st_uid == ::geteuid() && st.st_nlink == 1
-                && quint64(st.st_dev) == leases.text(1).toULongLong() && quint64(st.st_ino) == leases.text(2).toULongLong(), ErrorCode::IntegrityError);
+                && quint64(st.st_dev) == leases.text(1).toULongLong() && quint64(st.st_ino) == leases.text(2).toULongLong(), ErrorCode::IoError);
             ioCheck(::unlinkat(source.internal.value, name.constData(), 0) == 0);
             ioCheck(::fsync(source.internal.value) == 0);
         } else ioCheck(errno == ENOENT);
@@ -1039,6 +1039,18 @@ QCoro::Task<Result<QVector<NamespaceInfo>>> ReadOnlyFileManager::namespaces() {
         QVector<NamespaceInfo> result; for (const auto& [id, source] : impl.sources) result.append(sourceInfo(*source)); return result;
     });
 }
+QCoro::Task<Result<ReadOnlySourceUsage>> ReadOnlyFileManager::sourceUsage(NamespaceId ns) {
+    return impl_->run<ReadOnlySourceUsage>([ns](Impl& impl) -> Result<ReadOnlySourceUsage> {
+        auto source = impl.source(ns);
+        // The catalog is bounded by local namespace limits; aggregate on its worker.
+        Statement query(source->catalog.db,
+            "SELECT count(*),COALESCE(sum(size),0) FROM entries WHERE type=? AND status=?",
+            {int(EntryType::File), int(EntryStatus::Available)});
+        require(query.next(), ErrorCode::IoError);
+        require(query.number(0) >= 0 && query.number(1) >= 0, ErrorCode::IoError);
+        return ReadOnlySourceUsage{quint64(query.number(0)), quint64(query.number(1))};
+    });
+}
 QCoro::Task<Result<void>> ReadOnlyFileManager::closeSource(NamespaceId ns) {
     return impl_->run<void>([ns](Impl& impl) -> Result<void> {
         auto source = impl.source(ns); impl.watch(source->config.common.storage_root, false);
@@ -1209,7 +1221,7 @@ void releaseReader(ReadState& reader) {
         const auto name = snapshotName(reader.lease);
         struct stat st{};
         if (::fstatat(reader.source->internal.value, name.constData(), &st, AT_SYMLINK_NOFOLLOW) == 0) {
-            require(S_ISREG(st.st_mode) && quint64(st.st_dev) == reader.snapshot_identity.dev && quint64(st.st_ino) == reader.snapshot_identity.ino, ErrorCode::IntegrityError);
+            require(S_ISREG(st.st_mode) && quint64(st.st_dev) == reader.snapshot_identity.dev && quint64(st.st_ino) == reader.snapshot_identity.ino, ErrorCode::IoError);
             ioCheck(::unlinkat(reader.source->internal.value, name.constData(), 0) == 0);
         } else ioCheck(errno == ENOENT);
         ioCheck(::fsync(reader.source->internal.value) == 0);
@@ -1653,7 +1665,7 @@ QCoro::Task<Result<PreparedRead>> ReadOnlyFileManager::prepareReadImpl(Namespace
                 identity(path.value, false, "snapshot lease");
                 reader->snapshot_identity = evidence(path.value);
                 require(reader->snapshot_identity.size == reader->opened.size && reader->snapshot_identity.dev == lease.text(4).toULongLong()
-                    && reader->snapshot_identity.ino == lease.text(5).toULongLong(), ErrorCode::IntegrityError);
+                    && reader->snapshot_identity.ino == lease.text(5).toULongLong(), ErrorCode::IoError);
                 Opened staged{std::move(path), reader->snapshot_identity, false}; reader->fd = contentFd(staged, false);
                 // Rehash persisted staged bytes before trusting a resumed lease.
                 reader->hash = std::make_unique<QCryptographicHash>(QCryptographicHash::Sha256);
@@ -1709,7 +1721,7 @@ QCoro::Task<Result<PreparedRead>> ReadOnlyFileManager::prepareReadImpl(Namespace
             state->hash->addData(bytes); state->progress += quint64(bytes.size());
             if (state->progress != state->opened.size) return false;
             const auto digest = state->hash->result();
-            if (state->snapshot) require(digest == state->expected, ErrorCode::IntegrityError);
+            if (state->snapshot) require(digest == state->expected, ErrorCode::IoError);
             state->expected = digest; state->hash.reset();
             if (state->staging) {
                 ioCheck(::fsync(state->staging.value) == 0); ioCheck(::fchmod(state->staging.value, 0400) == 0);
@@ -1726,7 +1738,7 @@ QCoro::Task<Result<PreparedRead>> ReadOnlyFileManager::prepareReadImpl(Namespace
     }
     auto prepared = co_await impl->run<FileInfo>([state, options](Impl&) -> Result<FileInfo> {
         cancelCheck(options.cancel); validateReader(*state);
-        require(options.expected_sha256.isEmpty() || options.expected_sha256 == state->expected, ErrorCode::IntegrityError);
+        require(options.expected_sha256.isEmpty() || options.expected_sha256 == state->expected, ErrorCode::IoError);
         if (state->hashing) {
             state->source->catalog.exec("DELETE FROM hash_jobs WHERE id=?", {uuid(state->id)}); state->hashing = false;
             advance(*state->source);
@@ -1839,6 +1851,25 @@ QCoro::Task<Result<AccessContext>> ReadOnlyFileManager::descendantAccess(Namespa
         auto info = metadata(*source, directory, access);
         require(info.type == EntryType::Directory, ErrorCode::InvalidArgument);
         return projectedAccess(*source, access);
+    });
+    if (result && !check()) co_return Error{ErrorCode::MissingEntry};
+    co_return result;
+}
+}
+
+namespace dsfm {
+QCoro::Task<Result<QByteArray>> ReadOnlyFileManager::directoryIdentity(NamespaceId ns, DirectoryId directory, AccessContext access) {
+    auto check = impl_->deliveryCheck(ns, access);
+    auto result = co_await impl_->run<QByteArray>([ns, directory, access](Impl& state) -> Result<QByteArray> {
+        auto source = state.source(ns);
+        auto item = entry(*source, directory);
+        require(item.info.type == EntryType::Directory, ErrorCode::InvalidArgument);
+        auto opened = validateEntry(*source, item, access, AccessOperation::Inspect);
+        require(S_ISDIR(opened.identity.mode), ErrorCode::MissingEntry);
+        // Device/inode identifies the actual opened target even across namespaces
+        // and bind-mount aliases. Mount IDs would defeat that deduplication.
+        return QByteArray("posix-directory:") + QByteArray::number(opened.identity.dev) + ':'
+            + QByteArray::number(opened.identity.ino);
     });
     if (result && !check()) co_return Error{ErrorCode::MissingEntry};
     co_return result;

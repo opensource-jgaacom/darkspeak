@@ -119,8 +119,12 @@ public:
     Q_PROPERTY(bool sendBlockNotice READ getSendBlockNotice WRITE setSendBlockNotice NOTIFY sendBlockNoticeChanged)
 
     bool canSendFiles() const;
+    bool isCurrentConnection(QUuid id) const { return connection_ && connection_->peer->getConnectionId() == id; }
+    // Read-only access for connection-scoped feature adapters; Contact retains ownership.
+    PeerConnection::ptr_t currentConnection() const { return connection_ ? connection_->peer : nullptr; }
     bool canSendFileType(const QString &mime_type, const QString &filename = {}) const;
     bool canReceiveFile(const File &file) const;
+    bool canReceiveFileType(const QString &mime_type) const;
     bool canSendText(const QString &text) const;
 
     Q_INVOKABLE void connectToContact();
@@ -264,6 +268,8 @@ private slots:
     void onOutputBufferEmptied();
 
 private:
+    void handleReceivedFileResume(const PeerFileResume &resume, QDeadlineTimer deadline);
+    friend class TransferManager;
     void startIncomingFile(File &file, IncomingTransferStart start, std::optional<QDeadlineTimer> deadline = {});
     void startOutgoingFile(File &file, OutgoingTransferStart start);
     bool avatar_edited_ = false;
@@ -294,7 +300,6 @@ private:
     int id_ = -1; // Database id
     bool online_ = false;
     bool loadedMessageQueue_ = false;
-    bool loadedFileQueue_ = false;
     bool queued_connection_requested_ = false;
     bool queued_connection_scheduled_ = false;
     data_t data_;
@@ -316,7 +321,6 @@ private:
     std::unique_ptr<Connection> connection_;
     std::deque<Message::ptr_t> messageQueue_;
     std::deque<Message::ptr_t> unconfirmedMessageQueue_; // Waiting for ack
-    std::deque<std::shared_ptr<File>> fileQueue_;
     struct CompletionRetry {
         QDeadlineTimer deadline;
         std::optional<std::weak_ptr<File>> deferred;

@@ -118,6 +118,7 @@ Item {
         property File file: null
 
         MenuItem {
+            objectName: "transferCancelSend"
             onTriggered: {
                 contextFileSendMenu.file.cancel();
             }
@@ -162,6 +163,7 @@ Item {
         }
 
         MenuItem {
+            objectName: "transferCancelReceive"
             onTriggered: {
                 if (contextFileReceiveMenu.file && (contextFileReceiveMenu.file.resumable || contextFileReceiveMenu.file.state == File.FS_TRANSFERRING)) {
                     contextFileReceiveMenu.file.cancel();

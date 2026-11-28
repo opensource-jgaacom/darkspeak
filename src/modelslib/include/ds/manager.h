@@ -44,7 +44,8 @@ public:
         HOME,
         CONVERSATIONS,
         CHAT,
-        EVENTS
+        EVENTS,
+        TRANSFERS
     };
 
     Q_ENUM(Pages)

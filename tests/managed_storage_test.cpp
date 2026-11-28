@@ -134,6 +134,7 @@ public:
     void begin(const File::ptr_t &file) {
         file_ = file;
         owner_ = std::make_shared<OutgoingTransfer>(file, std::static_pointer_cast<PeerConnection>(shared_from_this()), OutgoingTransferStart::Offer);
+        if (!DsEngine::instance().transfers().acceptWork(*file)) throw std::runtime_error("Test work acceptance failed");
         if (!DsEngine::instance().transfers().submit(owner_)) throw std::runtime_error("Test sender admission failed");
     }
     uint64_t offerFile(const File &) override {
@@ -368,6 +369,7 @@ class ManagedStorageTest final : public QObject {
             dsfm::TransferAttempt attempt{QUuid::createUuid(), dsfm::minimum_checkpoint_interval, 1, progress.value().checkpoints.first()};
             QVERIFY(file->setCheckpointAttempt(attempt));
             auto session = std::make_shared<IncomingTransfer>(file, peer, IncomingTransferStart::Accept);
+            QVERIFY(engine_->transfers().acceptWork(*file));
             QVERIFY(engine_->transfers().submit(session));
             QTRY_VERIFY_WITH_TIMEOUT(session->outcome(), 10000);
             QCOMPARE(session->outcome()->kind, TransferSession::Outcome::Kind::Completed);
@@ -390,6 +392,7 @@ class ManagedStorageTest final : public QObject {
         dsfm::TransferAttempt attempt{QUuid::createUuid(), dsfm::minimum_checkpoint_interval, 1, progress.value().checkpoints.first()};
         QVERIFY(file->setCheckpointAttempt(attempt));
         auto session = std::make_shared<IncomingTransfer>(file, peer, IncomingTransferStart::Accept);
+        QVERIFY(engine_->transfers().acceptWork(*file));
         QVERIFY(engine_->transfers().submit(session));
         QTRY_COMPARE_WITH_TIMEOUT(peer->proposals, 1, 10000);
         file->cancel();
@@ -408,6 +411,7 @@ class ManagedStorageTest final : public QObject {
         dsfm::TransferAttempt attempt{QUuid::createUuid(), dsfm::minimum_checkpoint_interval, 1, progress.value().checkpoints.first()};
         QVERIFY(file->setCheckpointAttempt(attempt));
         auto first = std::make_shared<IncomingTransfer>(file, peer, IncomingTransferStart::Accept);
+        QVERIFY(engine_->transfers().acceptWork(*file));
         QVERIFY(engine_->transfers().submit(first));
         QTRY_VERIFY_WITH_TIMEOUT(first->outcome(), 10000);
         QCOMPARE(file->getState(), File::FS_PAUSED);
@@ -416,6 +420,7 @@ class ManagedStorageTest final : public QObject {
         QTRY_VERIFY(!engine_->transfers().find(file->checkpointKey().value()));
         auto reconnected = std::make_shared<OwnedReceivingPeer>(); reconnected->file = file; reconnected->payload = payload;
         auto resumed = std::make_shared<IncomingTransfer>(file, reconnected, IncomingTransferStart::Resume);
+        QVERIFY(engine_->transfers().acceptWork(*file));
         QVERIFY(engine_->transfers().submit(resumed));
         QTRY_VERIFY_WITH_TIMEOUT(resumed->outcome(), 10000);
         QCOMPARE(resumed->outcome()->kind, TransferSession::Outcome::Kind::Completed);
@@ -433,6 +438,7 @@ class ManagedStorageTest final : public QObject {
         dsfm::TransferAttempt attempt{QUuid::createUuid(), dsfm::minimum_checkpoint_interval, 1, progress.value().checkpoints.first()};
         QVERIFY(file->setCheckpointAttempt(attempt));
         auto session = std::make_shared<IncomingTransfer>(file, peer, IncomingTransferStart::Accept);
+        QVERIFY(engine_->transfers().acceptWork(*file));
         QVERIFY(engine_->transfers().submit(session));
         QTRY_COMPARE_WITH_TIMEOUT(peer->proposals, 1, 10000);
         identity_->setAllowFiles(false);
@@ -453,6 +459,7 @@ class ManagedStorageTest final : public QObject {
             dsfm::TransferAttempt attempt{QUuid::createUuid(), dsfm::minimum_checkpoint_interval, 1, progress.value().checkpoints.first()};
             QVERIFY(file->setCheckpointAttempt(attempt));
             auto owner = std::make_shared<IncomingTransfer>(file, peer, IncomingTransferStart::Accept);
+            QVERIFY(engine_->transfers().acceptWork(*file));
             QVERIFY(engine_->transfers().submit(owner));
             QTRY_COMPARE_WITH_TIMEOUT(peer->proposals, 1, 5000);
             TransferSession::Event event;
@@ -487,6 +494,7 @@ class ManagedStorageTest final : public QObject {
                 if (file->getState() == (before ? File::FS_HASHING : File::FS_DONE)) { ++cancellations; file->cancel(); }
             });
             auto owner = std::make_shared<IncomingTransfer>(file, peer, IncomingTransferStart::Accept);
+            QVERIFY(engine_->transfers().acceptWork(*file));
             QVERIFY(engine_->transfers().submit(owner));
             QTRY_VERIFY_WITH_TIMEOUT(owner->outcome(), 5000);
             QCOMPARE(cancellations, 1);
@@ -503,6 +511,7 @@ class ManagedStorageTest final : public QObject {
             auto file = incoming({}, QStringLiteral("owned-receipt-%1.bin").arg(i)); peer->file = file; peer->payload = {};
             QVERIFY(waitTask(file->prepareCheckpointProgress(dsfm::minimum_checkpoint_interval)));
             auto owner = std::make_shared<IncomingTransfer>(file, peer, IncomingTransferStart::Resume);
+            QVERIFY(engine_->transfers().acceptWork(*file));
             QVERIFY(engine_->transfers().submit(owner));
             QTRY_VERIFY_WITH_TIMEOUT(owner->outcome(), 5000);
             QCOMPARE(owner->outcome()->kind, TransferSession::Outcome::Kind::Completed);
@@ -2352,6 +2361,7 @@ private:
         if (!waitTask(file->prepareCheckpointProgress(dsfm::minimum_checkpoint_interval))) throw std::runtime_error("Test journal could not prepare");
         auto peer = std::make_shared<OwnedReceivingPeer>(); peer->file = file; peer->payload = std::move(bytes);
         auto session = std::make_shared<IncomingTransfer>(file, peer, IncomingTransferStart::Resume);
+        if (!engine_->transfers().acceptWork(*file)) throw std::runtime_error("Test work acceptance failed");
         if (!engine_->transfers().submit(session)) throw std::runtime_error("Test receiver admission failed");
         return peer;
     }

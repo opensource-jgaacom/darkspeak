@@ -16,6 +16,8 @@
 #include "ds/peerconnection.h"
 #include "ds/file.h"
 #include "ds/protocolcodec.h"
+#include "ds/filesharecodec.h"
+#include <functional>
 
 namespace ds {
 namespace prot {
@@ -89,7 +91,17 @@ public:
         FileResumeResult,
         AvatarResponse
         , BioResponse
+        , FileShare
     };
+
+    // Install before capabilities are sent. Readiness includes identity enablement,
+    // initialized handlers and current authorization. The service owns all VFS work.
+    void configureFileShare(std::function<bool()> ready, std::function<bool()> allow_utf8,
+                            std::function<void(const ds::protocol::Envelope &)> dispatch);
+    quint64 sendFileShare(ds::protocol::Envelope envelope);
+    bool fileShareReady() const;
+    bool fileShareAllowsUtf8() const { return fileshare_utf8_ && fileshare_utf8_() && peer_fileshare_utf8_; }
+    bool fileSharePeerPermits() const { return peer_fileshare_preferences_ && peer_fileshare_files_; }
 
 public slots:
     virtual void authorize(bool /*authorize*/) override {}
@@ -108,6 +120,8 @@ public slots:
                                         dsfm::DurableCheckpoint checkpoint,dsfm::CheckpointPhase phase);
     virtual uint64_t sendFilePause(const QByteArray &fileId,QUuid attempt,dsfm::DurableCheckpoint checkpoint,
                                    dsfm::TransferPauseReason reason);
+    uint64_t sendCooperativePause(const QByteArray &fileId, QUuid attempt,
+                                  dsfm::DurableCheckpoint checkpoint, int phase) override;
     uint64_t sendFileAck(const QByteArray& fileId, quint64 nextSequence,
                          quint64 nextOffset, bool final) override;
     uint64_t sendFileCancel(const QByteArray& fileId,
@@ -180,6 +194,8 @@ protected:
         QByteArray file_id;
         quint64 file_size = 0;
         quint32 checkpoint_interval = 0;
+        ds::protocol::Envelope fileshare_request;
+        bool cancelled = false;
     };
 
     InState inState_ = InState::DISABLED;
@@ -209,6 +225,19 @@ protected:
     void forgetInitialOffer(const QByteArray &file_id);
     bool notificationsDisabled_ = false;
     bool capabilitiesReceived_ = false;
+    bool capabilities_sent_ = false;
+    bool advertised_fileshare_ = false;
+    bool peer_fileshare_ = false;
+    bool peer_fileshare_utf8_ = false; // fail closed until current UserInfo
+    bool peer_fileshare_preferences_ = false;
+    bool peer_fileshare_files_ = false;
+    quint64 last_fileshare_request_ = 0;
+    std::function<bool()> fileshare_ready_;
+    std::function<bool()> fileshare_utf8_;
+    std::function<void(const ds::protocol::Envelope &)> fileshare_dispatch_;
+    std::map<quint64, PendingRequest> incoming_fileshare_;
+    void receiveFileShare(const ds::protocol::Envelope &envelope);
+    void expireFileShareRequests();
     quint32 advertised_checkpoint_interval_ = 0;
     quint32 peer_checkpoint_interval_ = 0;
     bool inboundFinalReceived_ = false;

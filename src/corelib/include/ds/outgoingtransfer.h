@@ -13,6 +13,8 @@ public:
     OutgoingTransfer(File::ptr_t file, PeerConnection::ptr_t peer, OutgoingTransferStart start,
                      std::optional<Event> request = {});
     ~OutgoingTransfer() override;
+    bool reconciliationOnly() const override { return start_ == OutgoingTransferStart::Recover; }
+    bool supportsCooperativePause() const override { return true; }
 protected:
     QCoro::Task<Outcome> execute() override;
     QCoro::Task<Outcome> finalize(Outcome result) override;
@@ -24,6 +26,7 @@ private:
     QCoro::Task<dsfm::Result<void>> offer();
     QCoro::Task<dsfm::Result<void>> negotiate();
     QCoro::Task<dsfm::Result<void>> confirm(dsfm::DurableCheckpoint checkpoint);
+    QCoro::Task<bool> pauseAtCheckpoint();
     bool acknowledge(const Event &event);
     bool redundant(const Event &event);
     Outcome sourceError(dsfm::Error error, bool proof = false);
@@ -42,5 +45,6 @@ private:
     std::map<quint64, quint64> in_flight_;
     quint64 next_sequence_ = 0, offset_ = 0, ack_sequence_ = 0, ack_offset_ = 0;
     bool final_ack_ = false;
+    bool cooperative_paused_ = false;
 };
 } // namespace ds::core

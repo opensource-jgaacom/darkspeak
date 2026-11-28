@@ -7,6 +7,7 @@
 #include <sqlite3.h>
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QMessageAuthenticationCode>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -75,6 +76,26 @@ QJsonObject record(const NodeInfo &node) {
             {"revision", QString::number(node.revision)},
             {"capabilities", int(node.capabilities.toInt())},
             {"symlinks", int(node.symlinks)}};
+}
+// Export records deliberately do not reuse the private scratch/database record.
+// A fresh key makes references opaque and unlinkable between catalog requests.
+bool catalogName(const QString &name, bool allow_utf8);
+QByteArray catalogId(const NodeId &id, const QByteArray &key) {
+    return id.isEmpty() ? QByteArray{} : QMessageAuthenticationCode::hash(id, key, QCryptographicHash::Sha256);
+}
+QJsonObject catalogRecord(const NodeInfo &node, const QByteArray &key) {
+    QJsonObject result{{"id", QString::fromLatin1(catalogId(node.id, key).toHex())},
+                       {"parent", QString::fromLatin1(catalogId(node.parent, key).toHex())},
+                       {"name", node.name}, {"type", int(node.type)},
+                       {"status", node.status == EntryStatus::Available ? 0 : 3}};
+    if (node.type == EntryType::File) {
+        result.insert("size", QString::number(node.size));
+        if (node.modified.isValid())
+            result.insert("modifiedUtcDay", QString::number(QDate(1970, 1, 1).daysTo(node.modified.toUTC().date())));
+        if (node.status == EntryStatus::Available && node.hash_state == HashState::Verified && node.sha256.size() == 32)
+            result.insert("sha256", QString::fromLatin1(node.sha256.toHex()));
+    }
+    return result;
 }
 NodeInfo fromRecord(QJsonObject object) {
     NodeInfo node;
@@ -628,6 +649,11 @@ struct Vfs::Impl : std::enable_shared_from_this<Impl> {
         }
         if (!assigned)
             co_return err(ErrorCode::MissingEntry);
+        const auto target_path = request.permissions ? co_await virtualPath(target.identity, encode(target), request) : QString{};
+        const bool reopened = request.permissions &&
+            (request.permissions->resolve(request.scope, request.groups, target_path, operation) == Decision::Allow ||
+             ((operation == Operation::Inspect || operation == Operation::Traverse) &&
+              request.permissions->navigable(request.scope, request.groups, target_path)));
         QUuid cursor = target.source;
         QSet<QUuid> seen;
         for (quint32 depth = 0; depth < limits.max_depth; ++depth) {
@@ -640,7 +666,7 @@ struct Vfs::Impl : std::enable_shared_from_this<Impl> {
                 co_return err(ErrorCode::MissingEntry);
             if (cursor == mount->mount.source_directory) {
                 if (request.permissions) {
-                    auto path = co_await virtualPath(target.identity, encode(target), request);
+                    const auto &path = target_path;
                     auto decision = request.permissions->resolve(request.scope, request.groups, path, operation);
                     if (navigation) {
                         if (!request.permissions->navigable(request.scope, request.groups, path))
@@ -664,8 +690,10 @@ struct Vfs::Impl : std::enable_shared_from_this<Impl> {
                     co_return err(ErrorCode::MissingEntry);
                 if (request.permissions) {
                     auto path = co_await virtualPath(target.identity, encode(parent), request);
-                    if (request.permissions->resolve(request.scope, request.groups, path, Operation::Recurse) !=
-                        Decision::Allow)
+                    const auto recursion = request.permissions->explain(request.scope, request.groups, path, Operation::Recurse);
+                    // A higher-tier grant can reopen a DENIED route. This never
+                    // bypasses a normal RECURSE denial or the source assignment.
+                    if (!recursion.allowed() && !(reopened && recursion.reason == AuthorizationReason::PathDenied))
                         co_return err(ErrorCode::MissingEntry);
                 }
             }
@@ -967,6 +995,7 @@ struct Vfs::Impl : std::enable_shared_from_this<Impl> {
     QCoro::Task<Result<bool>> conflict(QUuid identity, const Mount &mount, bool candidate = false,
                                        Request request = {});
     QCoro::Task<QString> virtualPath(QUuid identity, NodeId node, Request request = {});
+    QCoro::Task<Result<QVector<NodeInfo>>> permissionChildren(QUuid identity, NodeId parent, Request request);
     QCoro::Task<Result<QVector<NodeInfo>>> viewRows(QByteArray view, quint64 offset, quint32 count) {
         co_return co_await detail::work<QVector<NodeInfo>>(
             [disk = disk, view, offset, count]() -> Result<QVector<NodeInfo>> {
@@ -1675,6 +1704,18 @@ QCoro::Task<Result<NodeInfo>> Vfs::Impl::inspect(QUuid identity, NodeId id, Requ
         result.capabilities = restrictCapabilities(result.capabilities, origin_info.value().capabilities);
         result.symlinks = SymlinkPolicy(std::max(int(result.symlinks), int(origin_info.value().symlinks)));
     }
+    if (request.permissions && result.type == EntryType::Directory) {
+        const auto path = co_await virtualPath(identity, id, request);
+        if (request.permissions->resolve(request.scope, request.groups, path, Operation::Inspect) != Decision::Allow ||
+            request.permissions->resolve(request.scope, request.groups, path, Operation::List) != Decision::Allow) {
+            // Navigation-only ancestors reveal neither source metadata nor
+            // backend capabilities/freshness. Their route ID remains stable.
+            NodeInfo navigation;
+            navigation.id = result.id; navigation.parent = result.parent; navigation.name = result.name;
+            navigation.revision = revision(navigation);
+            co_return navigation;
+        }
+    }
     result.revision = revision(result);
     co_return result;
 }
@@ -1790,6 +1831,18 @@ QCoro::Task<Result<QByteArray>> Vfs::Impl::buildViewOnce(QUuid identity, NodeId 
                         co_return inserted.error();
                 }
             }
+    }
+    auto permission_children = co_await permissionChildren(identity, parent, request);
+    if (!permission_children) co_return permission_children.error();
+    for (const auto &child : permission_children.value()) {
+        bool shadowed = false;
+        for (const auto &mounted : children) shadowed |= presentName(mounted.mount.name, request) == child.name;
+        if (request.effective)
+            for (const auto &node : request.effective->navigation) shadowed |= node.parent == parent && presentName(node.name, request) == child.name;
+        if (!shadowed) {
+            auto inserted = co_await insert({child});
+            if (!inserted) co_return inserted.error();
+        }
     }
     bool source_list_allowed = true;
     if (!target.mount.isNull() && request.permissions) {
@@ -2062,6 +2115,13 @@ QCoro::Task<Result<DirectoryPage>> Vfs::list(QUuid identity, NodeId parent, Page
                     if (visible)
                         state->children.append(visible.value());
                 }
+        auto permission_children = co_await self->permissionChildren(identity, parent, request);
+        if (!permission_children) co_return permission_children.error();
+        for (const auto &child : permission_children.value())
+            if (!state->shadowed.contains(child.name)) {
+                state->shadowed.insert(child.name);
+                state->children.append(child);
+            }
         auto compare = [](const NodeInfo &a, const NodeInfo &b) {
             auto an = a.name.toUtf8(), bn = b.name.toUtf8();
             return an == bn ? a.id < b.id : an < bn;
@@ -2179,7 +2239,7 @@ QCoro::Task<Result<DirectoryPage>> Vfs::list(QUuid identity, NodeId parent, Page
         ++examined;
         if (!child && state->shadowed.contains(node.name))
             continue;
-        auto key = node.name.toUtf8() + char(0) + node.id;
+        auto key = node.name.toUtf8(); // One visible name per directory, regardless of reference.
         if (!state->last_key.isEmpty() && key <= state->last_key)
             continue;
         auto visible = co_await self->inspect(identity, node.id, request);
@@ -2313,6 +2373,60 @@ bool committing(const std::shared_ptr<Vfs::Impl> &self) {
     return false;
 }
 } // namespace
+// Derive only explicitly configured visible routes. Never enumerate a denied
+// source directory to discover navigation children or reveal hidden metadata.
+QCoro::Task<Result<QVector<NodeInfo>>> Vfs::Impl::permissionChildren(QUuid identity, NodeId parent, Request request) {
+    QVector<NodeInfo> result;
+    if (!request.permissions || parent == root(identity) ||
+        (request.effective && request.effective->navigation.contains(parent))) co_return result;
+    auto target = decode(identity, parent);
+    if (!target) co_return target.error();
+    auto path = co_await virtualPath(identity, parent, request);
+    if (request.permissions->resolve(request.scope, request.groups, path, Operation::List) == Decision::Allow)
+        co_return result;
+    // Policy evaluation can compare many configured rules. Keep this pure,
+    // bounded work off the UI thread, with a deadline and revocation checks.
+    auto names = co_await detail::work<QSet<QString>>([policy = request.permissions, groups = request.groups,
+            contact = request.scope, clock = request.current_generation, generation = request.generation,
+            path, timeout = limits.request_timeout_ms]() -> Result<QSet<QString>> {
+        QSet<QString> names;
+        QElapsedTimer elapsed; elapsed.start();
+        for (const auto &rule : policy->rules) {
+            if (!clock || clock->load() != generation) return err(ErrorCode::MissingEntry);
+            if (elapsed.elapsed() > timeout) return err(ErrorCode::Busy);
+            if ((rule.tier == Tier::Group && !groups.contains(rule.principal)) ||
+                (rule.tier == Tier::Contact && rule.principal != contact) ||
+                rule.path == path || !pathContains(path, rule.path)) continue;
+            bool granted = false;
+            for (auto op : {Operation::Inspect, Operation::List, Operation::Read})
+                granted |= rule.permissions.value(op) == Decision::Allow &&
+                    policy->resolve(contact, groups, rule.path, op) == Decision::Allow;
+            if (granted) names.insert(rule.path.mid(path == "/" ? 1 : path.size() + 1).section('/', 0, 0));
+        }
+        return names;
+    });
+    if (!names) co_return names.error();
+    auto backend = config.load()->backends.value(target.value().namespace_id).manager;
+    if (!backend) co_return err(ErrorCode::StorageUnavailable);
+    QElapsedTimer elapsed; elapsed.start();
+    for (const auto &name : names.value()) {
+        if (!request.current()) co_return err(ErrorCode::MissingEntry);
+        if (elapsed.elapsed() > limits.request_timeout_ms) co_return err(ErrorCode::Busy);
+        auto child = co_await logicalChild(backend, target.value().namespace_id, target.value().source, name, limits.max_depth);
+        if (!child) {
+            if (child.error().code == ErrorCode::MissingEntry || child.error().code == ErrorCode::PermissionDenied) continue;
+            co_return child.error();
+        }
+        if (child.value().namespace_id != target.value().namespace_id || !child.value().parent ||
+            *child.value().parent != target.value().source) continue;
+        auto child_target = target.value(); child_target.source = child.value().id;
+        auto visible = co_await inspect(identity, encode(child_target), request);
+        if (visible) result.append(visible.value());
+        else if (visible.error().code != ErrorCode::MissingEntry && visible.error().code != ErrorCode::PermissionDenied)
+            co_return visible.error();
+    }
+    co_return result;
+}
 Result<QVector<StorageResource>> Vfs::resources() const {
     auto result = impl_->available();
     if (!result)
@@ -3590,6 +3704,7 @@ struct CatalogExport::State {
     TemporaryInfo info;
     TemporaryAccess access;
     Target export_target;
+    QString export_path;
     Request request;
     QUuid identity;
     QVector<Target> mounts;
@@ -3608,8 +3723,12 @@ struct CatalogExport::State {
             if (!service || closed || service->stopping || !request.current() || now() > expires ||
                 now() - touched > service->limits.export_idle_ms)
                 return false;
-            auto export_grant = service->allowed(export_target, Operation::Export, request);
-            if (!export_grant || !export_grant.value()) return false;
+            for (auto operation : {Operation::List, Operation::Export}) {
+                auto grant = service->allowed(export_target, operation, request);
+                if (!grant || !grant.value()) return false;
+                if (request.permissions && request.permissions->resolve(request.scope, request.groups,
+                        export_path, operation) != Decision::Allow) return false;
+            }
             for (const auto &predicate : privacy_guards)
                 if (predicate && !predicate({}))
                     return false;
@@ -3749,9 +3868,10 @@ QCoro::Task<Result<std::shared_ptr<CatalogExport>>> Vfs::exportCatalog(QUuid ide
             co_return parsed.error();
         starting = parsed.value();
     }
-    auto approved = self->allowed(starting, Operation::Export, request);
-    if (!approved || !approved.value())
-        co_return err(ErrorCode::MissingEntry);
+    for (auto operation : {Operation::List, Operation::Export}) {
+        auto approved = self->allowed(starting, operation, request);
+        if (!approved || !approved.value()) co_return err(ErrorCode::MissingEntry);
+    }
     ++self->active_exports;
     ++self->identity_exports[identity];
     ++self->contact_exports[contact_key];
@@ -3765,9 +3885,20 @@ QCoro::Task<Result<std::shared_ptr<CatalogExport>>> Vfs::exportCatalog(QUuid ide
             if (!--self->contact_exports[contact_key]) self->contact_exports.remove(contact_key);
         }
     });
+    // Reserve admission before resolving a path (which may suspend). Reject the
+    // effective path policy before opening any staging artifact or enumeration.
+    QString export_path;
+    if (request.permissions) {
+        export_path = co_await self->virtualPath(identity, node, request);
+        if (!request.current() || !validVirtualPath(export_path)) co_return err(ErrorCode::MissingEntry);
+        for (auto operation : {Operation::List, Operation::Export})
+            if (request.permissions->resolve(request.scope, request.groups, export_path, operation) != Decision::Allow)
+                co_return err(ErrorCode::MissingEntry);
+    }
     auto info = co_await self->inspect(identity, node, request);
     if (!info)
         co_return info.error();
+    if (!request.current()) co_return err(ErrorCode::MissingEntry);
     if (info.value().type != EntryType::Directory)
         co_return err(ErrorCode::InvalidArgument);
     auto export_info = co_await self->export_backend->namespaceInfo(self->export_ns);
@@ -3821,10 +3952,27 @@ QCoro::Task<Result<std::shared_ptr<CatalogExport>>> Vfs::exportCatalog(QUuid ide
         }
         co_return Result<void>{};
     };
+    QByteArray catalog_key(32, Qt::Uninitialized);
+    randombytes_buf(catalog_key.data(), size_t(catalog_key.size()));
+    auto append_record = [&](const NodeInfo &item) -> QCoro::Task<Result<void>> {
+        if (!(item.parent.isEmpty() && item.name == "/") && !catalogName(item.name, request.allow_utf8))
+            co_return err(ErrorCode::InvalidName);
+        if (item.type != EntryType::File && item.type != EntryType::Directory)
+            co_return err(ErrorCode::InvalidArgument);
+        if (item.type == EntryType::File) {
+            if (item.size > quint64(std::numeric_limits<qint64>::max())) co_return err(ErrorCode::InvalidArgument);
+            if (item.modified.isValid()) {
+                const auto day = QDate(1970, 1, 1).daysTo(item.modified.toUTC().date());
+                if (day < -719162 || day > 2932896) co_return err(ErrorCode::InvalidArgument);
+            }
+        }
+        co_return co_await append(json(catalogRecord(item, catalog_key)) + '\n');
+    };
     auto header = co_await append(json({{"format", "darkspeak-vfs-catalog"},
-                                        {"version", 1},
+                                        {"version", 2},
+                                        {"encoding", request.allow_utf8 ? "UTF8" : "ASCII_ESCAPED"},
                                         {"recursive", recursive},
-                                        {"root", QString::fromLatin1(node.toHex())},
+                                        {"root", QString::fromLatin1(catalogId(node, catalog_key).toHex())},
                                         {"consistency", "per-directory"}}) +
                                   '\n');
     if (!header) {
@@ -3835,7 +3983,7 @@ QCoro::Task<Result<std::shared_ptr<CatalogExport>>> Vfs::exportCatalog(QUuid ide
     auto export_root_info = info.value();
     export_root_info.parent.clear();
     export_root_info.revision = revision(export_root_info);
-    auto root_record = co_await append(json(record(export_root_info)) + '\n');
+    auto root_record = co_await append_record(export_root_info);
     if (!root_record) {
         co_await writer->abort();
         co_await self->export_backend->discardTemporary(self->export_ns, staged.value().info.id, artifact_access);
@@ -3847,14 +3995,40 @@ QCoro::Task<Result<std::shared_ptr<CatalogExport>>> Vfs::exportCatalog(QUuid ide
         quint64 offset = 0;
         quint32 depth = 0;
         Target target;
+        QByteArray target_identity;
     };
+    auto directory_identity = [self, identity, request](NodeId id) -> QCoro::Task<Result<QByteArray>> {
+        if (id == self->root(identity) || (request.effective && request.effective->navigation.contains(id)))
+            co_return QByteArray("virtual-directory:") + identity.toRfc4122() + id;
+        auto target = self->decode(identity, id);
+        if (!target) co_return target.error();
+        auto access = co_await self->routedAccess(identity, id, request, Operation::Inspect);
+        if (!access) co_return access.error();
+        auto backend = self->config.load()->backends.value(target.value().namespace_id).manager;
+        if (!backend) co_return err(ErrorCode::MissingEntry);
+        auto key = co_await backend->directoryIdentity(target.value().namespace_id, target.value().source, access.value());
+        if (!key) co_return key.error();
+        if (key.value().isEmpty() || key.value().size() > 256) co_return err(ErrorCode::Corruption);
+        co_return key;
+    };
+    auto initial_identity = recursive ? co_await directory_identity(node) : Result<QByteArray>{QByteArray{}};
+    if (!initial_identity) {
+        co_await writer->abort();
+        co_await self->export_backend->discardTemporary(self->export_ns, staged.value().info.id, artifact_access);
+        co_return initial_identity.error();
+    }
     auto first = co_await self->buildView(identity, node, request, cancel);
     if (!first) {
         co_await writer->abort();
         co_await self->export_backend->discardTemporary(self->export_ns, staged.value().info.id, artifact_access);
         co_return first.error();
     }
-    QVector<Frame> stack{{node, first.value(), 0, 0, starting}};
+    QVector<Frame> stack{{node, first.value(), 0, 0, starting, initial_identity.value()}};
+    QSet<QByteArray> active_directories, visited_directories;
+    if (recursive) {
+        active_directories.insert(initial_identity.value());
+        visited_directories.insert(initial_identity.value());
+    }
     QVector<Target> mounts{starting};
     QVector<std::function<bool(FilesystemIdentity)>> privacy_guards;
     QVector<NodeId> route_origins;
@@ -3922,6 +4096,12 @@ QCoro::Task<Result<std::shared_ptr<CatalogExport>>> Vfs::exportCatalog(QUuid ide
         co_return error;
     };
     while (!stack.isEmpty()) {
+        if (recursive) {
+            auto current_identity = co_await directory_identity(stack.last().directory);
+            if (!current_identity) co_return co_await fail(current_identity.error());
+            if (current_identity.value() != stack.last().target_identity)
+                co_return co_await fail(err(ErrorCode::Conflict));
+        }
         auto rows = co_await self->viewRows(stack.last().view, stack.last().offset, 1);
         if (!rows)
             co_return co_await fail(rows.error());
@@ -3929,6 +4109,7 @@ QCoro::Task<Result<std::shared_ptr<CatalogExport>>> Vfs::exportCatalog(QUuid ide
             auto erased = co_await self->eraseView(stack.last().view);
             if (!erased)
                 co_return co_await fail(erased.error());
+            active_directories.remove(stack.last().target_identity);
             stack.removeLast();
             continue;
         }
@@ -3947,10 +4128,11 @@ QCoro::Task<Result<std::shared_ptr<CatalogExport>>> Vfs::exportCatalog(QUuid ide
             if (!captured)
                 co_return co_await fail(captured.error());
         }
-        auto added = co_await append(json(record(item)) + '\n');
+        auto added = co_await append_record(item);
         if (!added)
             co_return co_await fail(added.error());
         if (recursive && item.type == EntryType::Directory) {
+            // Even terminal aliases occupy a level in the portable catalog topology.
             if (stack.last().depth + 1 >= self->limits.max_depth)
                 co_return co_await fail(err(ErrorCode::QuotaExceeded));
             Result<Target> target =
@@ -3959,14 +4141,17 @@ QCoro::Task<Result<std::shared_ptr<CatalogExport>>> Vfs::exportCatalog(QUuid ide
                     : self->decode(identity, item.id);
             if (!target)
                 co_return co_await fail(target.error());
-            for (const auto &frame : stack)
-                if (frame.target.mount == target.value().mount &&
-                    frame.target.namespace_id == target.value().namespace_id &&
-                    frame.target.source == target.value().source)
-                    co_return co_await fail(err(ErrorCode::Conflict));
             auto grant = self->allowed(target.value(), Operation::List, request);
             if (!grant) co_return co_await fail(grant.error());
             if (!grant.value()) continue;
+            auto resolved_identity = co_await directory_identity(item.id);
+            if (!resolved_identity) co_return co_await fail(resolved_identity.error());
+            // Keep this independently authorized route as a terminal entry. Never
+            // copy descendants or permission decisions from the first route.
+            if (active_directories.contains(resolved_identity.value()) ||
+                visited_directories.contains(resolved_identity.value())) continue;
+            if (quint64(visited_directories.size()) >= self->limits.max_export_entries)
+                co_return co_await fail(err(ErrorCode::QuotaExceeded));
             bool known = false;
             for (const auto &mount : mounts)
                 if (mount.mount == target.value().mount)
@@ -3982,7 +4167,9 @@ QCoro::Task<Result<std::shared_ptr<CatalogExport>>> Vfs::exportCatalog(QUuid ide
             auto child = co_await self->buildView(identity, item.id, request, cancel);
             if (!child)
                 co_return co_await fail(child.error());
-            stack.append({item.id, child.value(), 0, stack.last().depth + 1, target.value()});
+            active_directories.insert(resolved_identity.value());
+            visited_directories.insert(resolved_identity.value());
+            stack.append({item.id, child.value(), 0, stack.last().depth + 1, target.value(), resolved_identity.value()});
         }
     }
     if (!buffer.isEmpty()) {
@@ -4027,6 +4214,7 @@ QCoro::Task<Result<std::shared_ptr<CatalogExport>>> Vfs::exportCatalog(QUuid ide
     state->info = selected.value();
     state->access = artifact_access;
     state->export_target = starting;
+    state->export_path = export_path;
     state->requires_utf8 = requires_utf8;
     state->identity = identity;
     state->request = request;
@@ -4248,7 +4436,8 @@ QCoro::Task<Result<void>> Vfs::shutdown() {
 
 namespace {
 struct Validation {
-    bool header = false, root_seen = false, recursive = false;
+    bool header = false, root_seen = false, recursive = false, allow_utf8 = true;
+    std::optional<bool> expected_allow_utf8, expected_recursive;
     NodeId root;
     QByteArray pending;
     struct Ancestor {
@@ -4272,15 +4461,35 @@ bool canonicalNumber(const QJsonValue &value) {
     auto n = value.toString().toULongLong(&ok);
     return ok && QString::number(n) == value.toString();
 }
-bool canonicalId(const QJsonValue &value) {
-    if (!value.isString() || value.toString().size() > 4096)
-        return false;
-    auto text = value.toString().toLatin1();
-    auto bytes = QByteArray::fromHex(text);
-    if (bytes.toHex() != text || bytes.isEmpty())
-        return false;
-    return (bytes.size() == 17 && bytes[0] == 0) || (bytes.size() == 105 && bytes[0] == 1) ||
-           (bytes.size() >= 334 && bytes.size() <= 2048 && bytes[0] == 2);
+bool canonicalId(const QJsonValue &value) { return canonicalHex(value, 32); }
+bool catalogName(const QString &name, bool allow_utf8) {
+    auto logicalName = [](const QString &label) {
+        if (!validName(label)) return false;
+        for (auto scalar : label.toUcs4()) {
+            const auto category = QChar::category(scalar);
+            if (category == QChar::Other_Control || category == QChar::Other_Format) return false;
+        }
+        return true;
+    };
+    if (!validName(name, true)) return false;
+    if (allow_utf8) return logicalName(name);
+    QByteArray decoded;
+    const auto encoded = name.toUtf8();
+    auto hex = [](char ch) { return ch >= '0' && ch <= '9' ? ch - '0' :
+        ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1; };
+    for (qsizetype i = 0; i < encoded.size(); ++i) {
+        const auto byte = quint8(encoded[i]);
+        if (byte < 32 || byte >= 127) return false;
+        if (byte != '%') { decoded.append(char(byte)); continue; }
+        if (i + 2 >= encoded.size()) return false;
+        const auto high = hex(encoded[i + 1]), low = hex(encoded[i + 2]);
+        if (high < 0 || low < 0) return false;
+        const auto value = (high << 4) | low;
+        if (value >= 32 && value < 127 && value != '%') return false;
+        decoded.append(char(value)); i += 2;
+    }
+    const auto label = QString::fromUtf8(decoded);
+    return label.toUtf8() == decoded && logicalName(label);
 }
 
 Result<void> parseLine(Validation &state, QByteArray line, const Limits &limits, PrivateState &disk, QByteArray view) {
@@ -4293,39 +4502,57 @@ Result<void> parseLine(Validation &state, QByteArray line, const Limits &limits,
         return err(ErrorCode::Corruption);
     auto object = document.object();
     if (!state.header) {
-        if (object.size() != 5 || object["format"] != "darkspeak-vfs-catalog" || object["version"] != 1 ||
-            object["consistency"] != "per-directory" || !object["recursive"].isBool() || !canonicalId(object["root"]))
+        if (object.size() != 6 || object["format"] != "darkspeak-vfs-catalog" || object["version"] != 2 ||
+            object["consistency"] != "per-directory" || !object["recursive"].isBool() || !canonicalId(object["root"]) ||
+            (object["encoding"] != "UTF8" && object["encoding"] != "ASCII_ESCAPED"))
+            return err(ErrorCode::Corruption);
+        state.allow_utf8 = object["encoding"] == "UTF8";
+        if (state.expected_allow_utf8 && *state.expected_allow_utf8 != state.allow_utf8)
             return err(ErrorCode::Corruption);
         state.header = true;
         state.recursive = object["recursive"].toBool();
+        if (state.expected_recursive && *state.expected_recursive != state.recursive)
+            return err(ErrorCode::Corruption);
         state.root = QByteArray::fromHex(object["root"].toString().toLatin1());
         return {};
     }
-    if (object.size() != 12 || !canonicalId(object["id"]) ||
+    if (!canonicalId(object["id"]) || !object["parent"].isString() ||
         (!object["parent"].toString().isEmpty() && !canonicalId(object["parent"])) || !object["name"].isString() ||
-        !canonicalNumber(object["size"]) || !canonicalNumber(object["revision"]) || !object["type"].isDouble() ||
-        (object["type"] != 0 && object["type"] != 1) || !object["status"].isDouble() ||
-        (object["status"] != 0 && object["status"] != 3) || !object["hashState"].isDouble() ||
-        object["hashState"].toDouble() != object["hashState"].toInt() || object["hashState"].toInt() < 0 ||
-        object["hashState"].toInt() > 3 || !object["symlinks"].isDouble() ||
-        object["symlinks"].toDouble() != object["symlinks"].toInt() || object["symlinks"].toInt() < 0 ||
-        object["symlinks"].toInt() > 2 || !object["capabilities"].isDouble() ||
-        object["capabilities"].toDouble() != object["capabilities"].toInt() || object["capabilities"].toInt() < 0 ||
-        object["capabilities"].toInt() > 63 || !object["modified"].isString() || !object["sha256"].isString() ||
-        (!object["sha256"].toString().isEmpty() && !canonicalHex(object["sha256"], 32)))
+        !object["type"].isDouble() || (object["type"] != 0 && object["type"] != 1) ||
+        !object["status"].isDouble() || (object["status"] != 0 && object["status"] != 3))
         return err(ErrorCode::Corruption);
-    auto node = fromRecord(object);
-    if ((!node.modified.isValid() && !object["modified"].toString().isEmpty()) ||
-        (node.type == EntryType::Directory && (node.size || !node.sha256.isEmpty())))
-        return err(ErrorCode::Corruption);
+    const bool file = object["type"] == int(EntryType::File);
+    int fields = 5;
+    if (file) {
+        ++fields;
+        if (!canonicalNumber(object["size"]) || object["size"].toString().toULongLong() > quint64(std::numeric_limits<qint64>::max()))
+            return err(ErrorCode::Corruption);
+        if (object.contains("modifiedUtcDay")) {
+            ++fields;
+            bool ok = false;
+            const auto day = object["modifiedUtcDay"].toString().toLongLong(&ok);
+            if (!ok || QString::number(day) != object["modifiedUtcDay"].toString() ||
+                day < -719162 || day > 2932896) return err(ErrorCode::Corruption);
+        }
+        if (object.contains("sha256")) {
+            ++fields;
+            if (object["status"] != 0 || !canonicalHex(object["sha256"], 32)) return err(ErrorCode::Corruption);
+        }
+    }
+    if (object.size() != fields) return err(ErrorCode::Corruption);
+    NodeInfo node;
+    node.id = QByteArray::fromHex(object["id"].toString().toLatin1());
+    node.parent = QByteArray::fromHex(object["parent"].toString().toLatin1());
+    node.name = object["name"].toString();
+    node.type = EntryType(object["type"].toInt());
     if (!state.root_seen) {
         if (node.id != state.root || node.type != EntryType::Directory || !node.parent.isEmpty() ||
-            (node.name != "/" && !validName(node.name, true)))
+            (node.name != "/" && !catalogName(node.name, state.allow_utf8)))
             return err(ErrorCode::Corruption);
         state.root_seen = true;
         state.ancestors.append({node.id, {}});
     } else {
-        if (!validName(node.name, true))
+        if (!catalogName(node.name, state.allow_utf8))
             return err(ErrorCode::Corruption);
         if (++state.entries > limits.max_export_entries)
             return err(ErrorCode::QuotaExceeded);
@@ -4333,7 +4560,7 @@ Result<void> parseLine(Validation &state, QByteArray line, const Limits &limits,
             state.ancestors.removeLast();
         if (state.ancestors.isEmpty() || (!state.recursive && node.parent != state.root))
             return err(ErrorCode::Corruption);
-        auto key = node.name.toUtf8() + char(0) + node.id;
+        auto key = node.name.toUtf8(); // One visible name per directory, regardless of reference.
         if (!state.ancestors.last().last_key.isEmpty() && key <= state.ancestors.last().last_key)
             return err(ErrorCode::Corruption);
         state.ancestors.last().last_key = key;
@@ -4356,7 +4583,8 @@ Result<void> parseLine(Validation &state, QByteArray line, const Limits &limits,
 }
 } // namespace
 QCoro::Task<Result<void>> Vfs::validateCatalog(std::shared_ptr<IFileReader> reader, quint64 size, QByteArray digest,
-                                               CancellationToken cancel) {
+                                               CancellationToken cancel, std::optional<bool> expected_allow_utf8,
+                                               std::optional<bool> expected_recursive) {
     auto self = impl_;
     auto available = self->available();
     if (!available)
@@ -4368,6 +4596,8 @@ QCoro::Task<Result<void>> Vfs::validateCatalog(std::shared_ptr<IFileReader> read
     Admission admission(self);
     OperationCancellation cancellation(self, cancel);
     auto state = std::make_shared<Validation>();
+    state->expected_allow_utf8 = expected_allow_utf8;
+    state->expected_recursive = expected_recursive;
     const auto view = QUuid::createUuid().toRfc4122();
     quint64 offset = 0;
     QElapsedTimer elapsed;
@@ -4417,10 +4647,16 @@ QCoro::Task<Result<void>> Vfs::validateCatalog(std::shared_ptr<IFileReader> read
     auto erased = co_await self->eraseView(view);
     if (!erased)
         co_return erased.error();
-    if (failure)
+    if (failure) {
+        LFLOG_TRACE << "VFS catalog validation failed stage=record/read code=" << int(failure->code)
+                    << " native=" << failure->native_code << " expected-format=2";
         co_return *failure;
-    if (!state->header || !state->root_seen || !state->pending.isEmpty() || state->hash.result() != digest)
+    }
+    if (!state->header || !state->root_seen || !state->pending.isEmpty() || state->hash.result() != digest) {
+        LFLOG_TRACE << "VFS catalog validation failed stage=completion/SHA-256 expected-format=2";
         co_return err(ErrorCode::IntegrityError);
+    }
+    LFLOG_DEBUG << "VFS portable catalog validated";
     co_return Result<void>{};
 }
 } // namespace dsvfs

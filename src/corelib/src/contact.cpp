@@ -539,10 +539,9 @@ void Contact::queueMessage(const Message::ptr_t &message)
 
 void Contact::queueFile(const std::shared_ptr<File> &file)
 {
-    loadFileQueue();
-
-    // Send offer or start transfer, depending on direction
-    if (std::find(fileQueue_.begin(), fileQueue_.end(), file) == fileQueue_.end()) fileQueue_.push_back(file);
+    auto &manager = DsEngine::instance().transfers();
+    auto bound = manager.acceptWork(*file);
+    if (!bound) { LFLOG_WARN << "Transfer work registration declined; code=" << int(bound.error().code); return; }
     if (file->getDirection() == File::OUTGOING) requestQueuedConnection();
     processFilesQueue();
 }
@@ -1173,25 +1172,15 @@ void Contact::startOutgoingFile(File &file, OutgoingTransferStart start)
     auto &engine = DsEngine::instance();
     const auto key = file.checkpointKey(); if (!key || engine.transfers().find(key.value())) return;
     auto owned = engine.getFileManager()->getFile(file.getId());
+    if (!engine.transfers().bindWork(owned)) return;
     const auto submitted = engine.transfers().submit(std::make_shared<OutgoingTransfer>(owned, connection_->peer, start));
     if (!submitted) LFLOG_DEBUG << "Outgoing session admission declined; code=" << int(submitted.error().code);
 }
 
 bool Contact::processFilesQueue()
 {
-    if (!connection_ || !isOnline() || !have_peer_preferences_ || fileQueue_.empty()) return false;
-    auto file = fileQueue_.front();
-    if (!connection_->peer->checkpointInterval() ||
-        (file->getDirection() == File::INCOMING && !file->checkpointInterval())) return rejectUnsupportedCheckpoint(file);
-    fileQueue_.pop_front();
-    if (file->getDirection() == File::OUTGOING) {
-        if (file->getState() == File::FS_WAITING || file->getState() == File::FS_QUEUED)
-            startOutgoingFile(*file, OutgoingTransferStart::Offer);
-    } else if (file->getState() == File::FS_QUEUED) {
-        startIncomingFile(*file, file->pendingId().isNull() && file->storageId().isNull()
-            ? IncomingTransferStart::Accept : IncomingTransferStart::Resume);
-    }
-    return true;
+    DsEngine::instance().transfers().dispatchWork();
+    return false;
 }
 
 void Contact::onReceivedConnectionResponse(const PeerConnectionResponse& response)
@@ -1272,10 +1261,16 @@ void Contact::onReceivedFileOfferResponse(const PeerFileOfferResponse& response)
 
 void Contact::onReceivedFileResume(const PeerFileResume& resume)
 {
+    handleReceivedFileResume(resume, QDeadlineTimer{30000});
+}
+
+void Contact::handleReceivedFileResume(const PeerFileResume& resume, QDeadlineTimer deadline)
+{
     if (!connection_ || connection_->peer != resume.peer) return;
     touchLastSeen();
     const auto file = DsEngine::instance().getFileManager()->getFileFromId(resume.fileId, *this, File::OUTGOING);
     const auto reject = [&] { resume.peer->sendCheckpointResumeResult(resume.requestId, resume.fileId, FileResumeStatus::Rejected); };
+    if (deadline.hasExpired()) { reject(); return; }
     if (!file || getState() != ACCEPTED || iBlocked() || !resume.peer->checkpointInterval() ||
         file->checkpointInterval() != resume.checkpoint_interval || file->failureReason() != int(dsfm::TransferFailureReason::None) ||
         file->getSize() < 0 || quint64(file->getSize()) != resume.fileSize || file->getHash() != resume.sha256 ||
@@ -1284,13 +1279,37 @@ void Contact::onReceivedFileResume(const PeerFileResume& resume)
     auto &manager = DsEngine::instance().transfers();
     TransferSession::Event event; event.kind = TransferSession::Event::Kind::Resume;
     event.request = resume.requestId; event.candidates = resume.retained_checkpoints;
-    event.deadline = QDeadlineTimer{30000};
+    event.deadline = deadline;
     if (auto session = manager.find(key.value())) {
+        if (session->connection() == resume.connectionId &&
+            (session->phase() == TransferSession::Phase::Transferring || session->phase() == TransferSession::Phase::Finalizing) &&
+            session->claimDeferredCooperativeResume()) {
+            // ACK dispatch wakes the old owner asynchronously. Retain only one
+            // bounded resume while that owner joins its finalization; do not
+            // reject merely because ACK and resume shared a socket read.
+            auto *expiry = new QTimer(this);
+            expiry->setSingleShot(true);
+            connect(&manager, &TransferManager::attemptFinished, expiry,
+                    [this, expiry, resume, deadline, transfer_key=key.value()](dsfm::TransferKey retired) {
+                if (retired != transfer_key || !expiry->isActive()) return;
+                expiry->stop();
+                expiry->deleteLater();
+                handleReceivedFileResume(resume, deadline);
+            });
+            connect(expiry, &QTimer::timeout, expiry, [this, expiry, resume] {
+                if (connection_ && connection_->peer == resume.peer)
+                    resume.peer->sendCheckpointResumeResult(resume.requestId, resume.fileId, FileResumeStatus::Rejected);
+                expiry->deleteLater();
+            });
+            expiry->start(int(std::min<qint64>(30000, deadline.remainingTime())));
+            return;
+        }
         if (session->connection() != resume.connectionId || session->phase() == TransferSession::Phase::Transferring ||
             !session->deliver(resume.connectionId, session->attempt(), std::move(event))) reject();
         return;
     }
     if (file->getState() != File::FS_PAUSED && file->getState() != File::FS_FAILED && file->getState() != File::FS_OFFERED) { reject(); return; }
+    if (!manager.bindWork(file)) { reject(); return; }
     auto submitted = manager.submit(std::make_shared<OutgoingTransfer>(file, resume.peer, OutgoingTransferStart::Resume, std::move(event)));
     if (!submitted) reject();
 }
@@ -1302,7 +1321,6 @@ bool Contact::rejectUnsupportedCheckpoint(const std::shared_ptr<File> &file)
         if (file->getDirection() == File::INCOMING) startIncomingFile(*file, IncomingTransferStart::Resume);
         else startOutgoingFile(*file, OutgoingTransferStart::Offer);
     }
-    std::erase(fileQueue_, file);
     return true;
 }
 
@@ -1314,6 +1332,7 @@ void Contact::startIncomingFile(File &file, IncomingTransferStart start, std::op
     if (!key) return;
     auto &manager = DsEngine::instance().transfers();
     if (manager.find(key.value())) return;
+    if (!manager.bindWork(owned)) return;
     auto session = std::make_shared<IncomingTransfer>(owned, connection_->peer, start, deadline.value_or(QDeadlineTimer{QDeadlineTimer::Forever}));
     const auto admitted = manager.submit(std::move(session));
     if (!admitted) LFLOG_DEBUG << "Incoming session admission declined; code=" << int(admitted.error().code);
@@ -1589,12 +1608,16 @@ bool Contact::canSendFileType(const QString &mime_type, const QString &filename)
         && (peerUserInfo_.allowUtf8 || text_policy::permittedAscii(filename, false))));
 }
 
+bool Contact::canReceiveFileType(const QString &mime_type) const {
+    const auto *identity = getIdentity();
+    return getState() == ACCEPTED && !iBlocked() && identity && identity->getAllowFiles() &&
+        mimeAllowed(identity->getAllowMimeTypes(), mime_type);
+}
 bool Contact::canReceiveFile(const File &file) const
 {
     const auto *identity = getIdentity();
-    if (getState() != ACCEPTED || iBlocked() || !identity || !identity->getAllowFiles() ||
-        file.getDirection() != File::INCOMING || file.getContactId() != getId() ||
-        file.getIdentityId() != getIdentityId() || !mimeAllowed(identity->getAllowMimeTypes(), file.getMimeType()))
+    if (!canReceiveFileType(file.getMimeType()) || file.getDirection() != File::INCOMING ||
+        file.getContactId() != getId() || file.getIdentityId() != getIdentityId())
         return false;
     if (!file.isThumbnail()) return true;
     if (file.getMimeType() != "image/jpeg" || file.getSize() <= 0 || file.getSize() > media_preview::max_encoded_bytes)
@@ -1762,46 +1785,16 @@ void Contact::loadMessageQueue()
 
 void Contact::loadFileQueue()
 {
-    if (loadedFileQueue_) {
-        return;
-    }
-
-    QSqlQuery query;
-    query.prepare("SELECT id FROM file WHERE contact_id=:cid AND ((direction=:out AND state=:waiting AND NOT EXISTS(SELECT 1 FROM file_thumbnail_v1 t WHERE t.file_id=file.id)) OR (direction=:in AND state=:queued))");
-    query.bindValue(":cid", getId());
-    query.bindValue(":out", static_cast<int>(File::OUTGOING));
-    query.bindValue(":in", static_cast<int>(File::INCOMING));
-    query.bindValue(":waiting", static_cast<int>(File::FS_WAITING));
-    query.bindValue(":queued", static_cast<int>(File::FS_QUEUED));
-
-    if(!query.exec()) {
-        throw Error(QStringLiteral("Failed to query file-queue: %1").arg(
-                        query.lastError().text()));
-    }
-
-    auto fileMgr = DsEngine::instance().getFileManager();
-
-    while(query.next()) {
-        fileQueue_.push_back(fileMgr->getFile(query.value(0).toInt()));
-    }
-
-    if (!fileQueue_.empty()) {
-        LFLOG_DEBUG << "Loaded " << fileQueue_.size()
-                    << " queued files for contact "
-                    << getName()
-                    << " on identity " << getIdentity()->getName();
-    }
-
-    loadedFileQueue_ = true;
+    // A bounded application-wide registry restores feature records. There is no
+    // contact-owned scheduling queue; repeated calls are idempotent.
+    DsEngine::instance().transfers().restoreWork();
 }
 
 void Contact::clearFileQueues()
 {
     if (connection_ && connection_->peer) DsEngine::instance().transfers().retireConnection(connection_->peer->getConnectionId());
-    fileQueue_.clear();
     completed_replay_requests_.clear();
     updateCompletionTimer();
-    loadedFileQueue_ = false;
 }
 
 void Contact::prepareForNewConnection()
@@ -2094,8 +2087,8 @@ void Contact::acceptCheckpointFile(File &file)
         file.getContactId() != getId() || file.getIdentityId() != getIdentityId() || !canReceiveFile(file)) return;
     QString reason;
     if (!DsEngine::instance().getFileManager()->canAcceptIncoming(file, reason)) return;
-    if (!connection_ || !isOnline()) { file.queueForTransfer(); return; }
-    startIncomingFile(file, IncomingTransferStart::Accept);
+    if (!DsEngine::instance().transfers().acceptWork(file)) return;
+    file.queueForTransfer();
 }
 
 void Contact::recoverCompletedFile(File &file, std::optional<QDeadlineTimer> deadline)

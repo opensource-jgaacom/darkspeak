@@ -1,6 +1,9 @@
 project(core LANGUAGES CXX)
 
 add_library(${PROJECT_NAME} STATIC
+    src/transferwork.cpp
+    src/transferworkadapter.cpp
+    include/ds/transferwork.h
     src/transfermanager.cpp
     src/incomingtransfer.cpp
     include/ds/incomingtransfer.h
@@ -18,6 +21,9 @@ add_library(${PROJECT_NAME} STATIC
     src/conversation.cpp
     src/file.cpp
     src/managedstorage.cpp
+    src/sharepermissions.cpp
+    include/ds/sharepermissions.h
+    include/ds/contactgroups.h
     src/sharemounts.cpp
     include/ds/sharemounts.h
     src/readonlyresources.cpp

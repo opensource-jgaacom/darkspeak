@@ -96,6 +96,10 @@ ApplicationWindow {
         else if (settingsLoader.item)
             settingsLoader.item.open();
     }
+    function openTransfers(identity, contact, identityName, contactName) {
+        transferQueue.setScope(identity || "", contact || "", identityName || "", contactName || "");
+        manager.currentPage = Manager.TRANSFERS;
+    }
     function openAbout() {
         if (!aboutLoader.active)
             aboutLoader.active = true;
@@ -273,6 +277,11 @@ ApplicationWindow {
                             page: Manager.CONVERSATIONS
                         },
                         {
+                            label: qsTr("Transfers"),
+                            glyph: "swap_vert",
+                            page: Manager.TRANSFERS
+                        },
+                        {
                             label: qsTr("Events"),
                             glyph: "history",
                             page: Manager.EVENTS
@@ -289,7 +298,7 @@ ApplicationWindow {
                         width: navigation.width
                         height: appearance.navigationHeight
                         highlighted: manager.currentPage === modelData.page
-                        onClicked: manager.currentPage = modelData.page
+                        onClicked: modelData.page === Manager.TRANSFERS ? mainWindow.openTransfers() : manager.currentPage = modelData.page
                         Accessible.name: modelData.label
                         ToolTip.visible: hovered && navigationPane.collapsed
                         ToolTip.text: modelData.label
@@ -349,6 +358,11 @@ ApplicationWindow {
             }
             PrimaryPage {
                 anchors.fill: parent
+                pageNumber: Manager.TRANSFERS
+                pageSource: "Transfers.qml"
+            }
+            PrimaryPage {
+                anchors.fill: parent
                 pageNumber: Manager.EVENTS
                 pageSource: "Events.qml"
             }
@@ -382,9 +396,14 @@ ApplicationWindow {
             Item {
                 Layout.fillWidth: true
             }
+            ToolButton {
+                text: qsTr("Transfers: %1 active · %2 waiting").arg(transferQueue.applicationCounts.active || 0).arg(transferQueue.applicationCounts.queued || 0)
+                Accessible.name: text
+                onClicked: mainWindow.openTransfers()
+            }
             McpActivity {
                 visible: !!mcp && mcp.enabled
-                onOpenSettings: mainWindow.openSettings(7)
+                onOpenSettings: mainWindow.openSettings(8)
                 onOpenApprovals: manager.currentPage = Manager.HOME
             }
             Label {

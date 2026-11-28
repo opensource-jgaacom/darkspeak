@@ -6,6 +6,7 @@
 #include <QTcpSocket>
 #include <QUuid>
 #include <stdexcept>
+#include <limits>
 
 #include "ds/memoryview.h"
 
@@ -33,9 +34,10 @@ public:
     void write(const T& data) {
         const char *p = reinterpret_cast<const char *>(data.data());
         const qint64 bytes = data.size();
-        if (bytes < 0 || static_cast<size_t>(outData.size()) > max_outgoing_bytes
+        const auto queued = queuedBytes();
+        if (bytes < 0 || queued > max_outgoing_bytes
                 || static_cast<size_t>(bytes) > max_outgoing_bytes
-                - static_cast<size_t>(outData.size())) {
+                - queued) {
             throw std::runtime_error("Connection output queue limit exceeded");
         }
         outData.append(p, bytes);
@@ -43,7 +45,14 @@ public:
     }
 
     static constexpr size_t maxOutgoingBytes() noexcept { return max_outgoing_bytes; }
-    size_t queuedBytes() const noexcept { return static_cast<size_t>(outData.size()); }
+    size_t queuedBytes() const noexcept {
+        // QTcpSocket::write usually accepts the complete buffer immediately.
+        // Its pending bytes remain part of our bounded output admission.
+        const auto pending = static_cast<size_t>(qMax<qint64>(0, bytesToWrite()));
+        const auto staged = static_cast<size_t>(outData.size());
+        return pending > std::numeric_limits<size_t>::max() - staged
+            ? std::numeric_limits<size_t>::max() : pending + staged;
+    }
 
     void wantBytes(size_t bytesRequested);
 

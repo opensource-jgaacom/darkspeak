@@ -162,9 +162,12 @@ signals; it does not claim to eliminate timing side channels.
 `exportCatalog` stages a versioned JSON-lines catalog through the supplied managed
 backend. It supports one directory or bounded depth-first recursion across mounts,
 with per-directory consistency rather than a global transaction across catalogs.
-The format carries virtual IDs, logical names, status/hash state, capabilities,
-privacy-reduced metadata and backend symlink warning policy. It contains no local
-paths, namespace IDs, source IDs, hidden counts, or raw backend generations.
+The portable v2 format carries export-scoped opaque references, logical names,
+ready/updating state, file sizes, coarse UTC-day file times and verified hashes.
+Its header explicitly tags UTF8 or ASCII_ESCAPED presentation. It contains no local
+paths, private route/backend IDs, capabilities, symlink policy, directory times,
+hidden counts, or raw backend generations. The validator rejects unknown fields
+and formats and can require the negotiated presentation before cache publication.
 Generation never leaves database transactions open waiting for network traffic.
 Limits fail explicitly without publishing a partial export.
 

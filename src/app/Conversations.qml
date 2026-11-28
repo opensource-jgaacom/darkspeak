@@ -173,6 +173,14 @@ Page {
                         color: appearance.secondaryText
                     }
                     ToolButton {
+                        text: qsTr("Transfers")
+                        enabled: root.hasConversation
+                        onClicked: {
+                            var contact = conversations.current.participant;
+                            mainWindow.openTransfers(contact.identity.uuid, contact.uuid, contact.identity.name, contact.name || contact.nickName);
+                        }
+                    }
+                    ToolButton {
                         text: qsTr("Details")
                         enabled: root.hasConversation
                         onClicked: details.open()

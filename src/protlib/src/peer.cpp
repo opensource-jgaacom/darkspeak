@@ -326,6 +326,22 @@ void Peer::releaseUnapprovedBudget() noexcept
 
 uint64_t Peer::send(const ds::protocol::Envelope& envelope)
 {
+    if (fileshare::isRequest(envelope) || fileshare::isResponse(envelope)) {
+        expireFileShareRequests();
+        if (!fileShareReady() || !fileshare::validate(envelope, fileshare_utf8_() && peer_fileshare_utf8_) ||
+            !fileshare::validateWire(codec::serialize(envelope)))
+            throw Error("Invalid or unnegotiated outgoing FileShare control");
+        if (fileshare::isRequest(envelope)) {
+            auto it = outstandingRequests_.find(envelope.requestId());
+            if (it == outstandingRequests_.end() || it->second.type != RequestType::FileShare ||
+                codec::serialize(it->second.fileshare_request) != codec::serialize(envelope))
+                throw Error("FileShare request must use sendFileShare");
+        } else {
+            auto it = incoming_fileshare_.find(envelope.responseToRequestId());
+            if (it == incoming_fileshare_.end() || !fileshare::matches(it->second.fileshare_request,envelope))
+                throw Error("FileShare response has no matching request");
+        }
+    }
     if (!connection_->isOpen()) {
         throw runtime_error("Connection is closed");
     }
@@ -422,6 +438,7 @@ uint64_t Peer::sendFilePause(const QByteArray &fileId,QUuid attempt,dsfm::Durabl
     if (!checkpointInterval()) throw Error("Checkpoint pause is not negotiated");
     if(fileId.size()!=16 || attempt.isNull() || reason==dsfm::TransferPauseReason::None)throw Error("Invalid transfer pause");
     ds::protocol::FilePause message;message.setFileId(fileId);message.setAttemptId(attempt.toRfc4122());
+    message.setVersion(1);message.setPhase(ds::protocol::FilePause::Phase::NOTICE);
     message.setConfirmedCheckpoint(codec::checkpointReference(checkpoint));
     using Reason=ds::protocol::FilePauseReasonGadget::FilePauseReason;
     switch(reason) {
@@ -434,6 +451,21 @@ uint64_t Peer::sendFilePause(const QByteArray &fileId,QUuid attempt,dsfm::Durabl
     default:throw Error("Invalid transfer pause reason");
     }
     ds::protocol::Envelope envelope;envelope.setProtocolVersion(codec::protocolVersion);envelope.setFilePause(std::move(message));return send(envelope);
+}
+
+uint64_t Peer::sendCooperativePause(const QByteArray &fileId, QUuid attempt,
+                                  dsfm::DurableCheckpoint checkpoint, int phase) {
+    if (!checkpointInterval() || fileId.size()!=16 || fileId==QByteArray(16,'\0') || attempt.isNull() ||
+        phase<2 || phase>4 || checkpoint.final || checkpoint.pause_boundary)
+        throw Error("Invalid cooperative checkpoint pause");
+    ds::protocol::FilePause message;
+    message.setFileId(fileId);message.setAttemptId(attempt.toRfc4122());
+    message.setVersion(1);message.setPhase(ds::protocol::FilePause::Phase(phase));
+    message.setReason(ds::protocol::FilePauseReasonGadget::FilePauseReason::TRANSFER_FEATURE_PAUSED);
+    message.setConfirmedCheckpoint(codec::checkpointReference(checkpoint));
+    ds::protocol::Envelope envelope;
+    envelope.setProtocolVersion(codec::protocolVersion);envelope.setFilePause(std::move(message));
+    return send(envelope);
 }
 
 uint64_t Peer::sendFileAck(const QByteArray&, quint64, quint64, bool)
@@ -630,7 +662,8 @@ void Peer::onReceivedEnvelope(const ds::protocol::Envelope& envelope)
             || envelope.hasAvatarRequest() || envelope.hasAvatarResponse()
             || envelope.hasAvatar() || envelope.hasMessageReceipt()
             || envelope.hasFileOfferResponse() || envelope.hasBioRequest()
-            || envelope.hasBioResponse() || envelope.hasFileCheckpoint() || envelope.hasFilePause();
+            || envelope.hasBioResponse() || envelope.hasFileCheckpoint() || envelope.hasFilePause()
+            || fileshare::isRequest(envelope) || fileshare::isResponse(envelope);
     if (envelope.protocolVersion() != codec::protocolVersion || !hasBody) {
         protocolError(QStringLiteral("Invalid v3 envelope"));
     }
@@ -644,21 +677,26 @@ void Peer::onReceivedEnvelope(const ds::protocol::Envelope& envelope)
         capabilitiesReceived_ = true;
         peerMaxRecordBytes_ = envelope.capabilities().maxRecordBytes();
         peer_checkpoint_interval_ = envelope.capabilities().checkpointIntervalBytes();
+        peer_fileshare_ = envelope.capabilities().capabilities().contains(QStringLiteral("fileshare-v1"));
         return;
     }
     if ((envelope.hasRequestId() && !envelope.hasConnectionRequest()
             && !envelope.hasAvatarRequest() && !envelope.hasBioRequest())
-            && !envelope.hasFileResume()) {
+            && !envelope.hasFileResume() && !fileshare::isRequest(envelope)) {
         protocolError(QStringLiteral("Correlation does not match v3 request body"));
     }
     if (envelope.hasResponseToRequestId()
             && !envelope.hasConnectionResponse()
             && !envelope.hasAvatarResponse()
-            && !envelope.hasFileResumeResult() && !envelope.hasBioResponse()) {
+            && !envelope.hasFileResumeResult() && !envelope.hasBioResponse() && !fileshare::isResponse(envelope)) {
         protocolError(QStringLiteral("Correlation does not match v3 envelope body"));
     }
     if (applicationAuthorizationPending_) {
         protocolError(QStringLiteral("Application packet received before authorization"));
+    }
+    if (fileshare::isRequest(envelope) || fileshare::isResponse(envelope)) {
+        receiveFileShare(envelope);
+        return;
     }
     // File transfers require checkpoint version one. Text and other unrelated
     // features remain usable on a connection without this capability.
@@ -899,6 +937,9 @@ void Peer::onReceivedEnvelope(const ds::protocol::Envelope& envelope)
                               || info.bio().bioText().toUtf8().size() > 4096)) {
             protocolError(QStringLiteral("Bio exceeds the v3 size limit"));
         }
+        peer_fileshare_utf8_ = info.securityPrefs().allowUtf8();
+        peer_fileshare_preferences_ = true;
+        peer_fileshare_files_ = info.securityPrefs().allowFiles();
         core::recordPeerEvent(*this, core::EventJournal::UserInfo, core::EventJournal::Incoming);
         emit receivedUserInfo(incoming);
         return;
@@ -999,7 +1040,7 @@ void Peer::onReceivedEnvelope(const ds::protocol::Envelope& envelope)
             selected->getContact()->getState() != Contact::ACCEPTED ||
             !codec::validateFilePause(pause, quint64(selected->getSize()), selected->checkpointInterval()))
             protocolError(QStringLiteral("Invalid checkpoint pause"));
-        // This reference is advisory. It never writes or advances progress.
+        // Neither advisory nor cooperative pause references establish progress.
         using Reason = ds::protocol::FilePauseReasonGadget::FilePauseReason;
         dsfm::TransferPauseReason reason;
         switch (pause.reason()) {
@@ -1011,12 +1052,32 @@ void Peer::onReceivedEnvelope(const ds::protocol::Envelope& envelope)
         case Reason::TRANSFER_FEATURE_PAUSED: reason = dsfm::TransferPauseReason::FeaturePaused; break;
         default: protocolError(QStringLiteral("Unknown checkpoint pause reason"));
         }
-        if (selected->getState() == File::FS_PAUSED && selected->dataPauseReason() == reason) return;
+        const auto phase = int(pause.phase());
+        if ((phase==2 || phase==4) && selected->getDirection()!=File::OUTGOING)
+            protocolError(QStringLiteral("Cooperative pause request/ack targets a receiver"));
+        if (phase==3 && selected->getDirection()!=File::INCOMING)
+            protocolError(QStringLiteral("Cooperative pause fence targets a sender"));
+        if (phase==1 && selected->getState() == File::FS_PAUSED && selected->dataPauseReason() == reason) return;
         if (const auto key = selected->checkpointKey(); key) {
             if (auto session = DsEngine::instance().transfers().find(key.value())) {
                 if (session->connection() != getConnectionId() || session->attempt().toRfc4122() != pause.attemptId())
                     protocolError(QStringLiteral("Pause belongs to another connection or attempt"));
-                session->stop(TransferSession::Stop::Paused, reason);
+                if (phase==1) session->stop(TransferSession::Stop::Paused, reason);
+                else if (phase==2) {
+                    // A late request may race completion; the owner decides
+                    // whether another nonfinal checkpoint can still be used.
+                    session->requestCooperativePause(false);
+                } else {
+                    const auto &reference = pause.confirmedCheckpoint();
+                    TransferSession::Event event;
+                    event.kind = TransferSession::Event::Kind::Pause;
+                    event.sequence = quint64(phase);
+                    event.pause = reason;
+                    event.checkpoint = {reference.sequence(),reference.nextOffset(),reference.prefixSha256(),
+                                        reference.final(),reference.pauseBoundary()};
+                    if (!session->deliver(getConnectionId(), session->attempt(), std::move(event)))
+                        protocolError(QStringLiteral("Cooperative pause rejected by owning session"));
+                }
                 return;
             }
         }
@@ -1243,14 +1304,104 @@ void Peer::onReceivedEnvelope(const ds::protocol::Envelope& envelope)
     protocolError(QStringLiteral("Unsupported v3 envelope body"));
 }
 
+void Peer::configureFileShare(std::function<bool()> ready, std::function<bool()> allow_utf8,
+                             std::function<void(const ds::protocol::Envelope &)> dispatch)
+{
+    if (capabilities_sent_) throw Error("FileShare configuration requires a new connection");
+    fileshare_ready_ = std::move(ready);
+    fileshare_utf8_ = std::move(allow_utf8);
+    fileshare_dispatch_ = std::move(dispatch);
+}
+
+bool Peer::fileShareReady() const
+{
+    return inState_ != InState::CLOSING && !applicationAuthorizationPending_ &&
+        capabilitiesReceived_ && advertised_fileshare_ && peer_fileshare_ &&
+        fileshare_ready_ && fileshare_utf8_ && fileshare_dispatch_ && fileshare_ready_();
+}
+
+void Peer::expireFileShareRequests()
+{
+    expireOutstandingRequests();
+    const auto now = std::chrono::steady_clock::now();
+    for (auto it = incoming_fileshare_.begin(); it != incoming_fileshare_.end();) {
+        if (it->second.expires <= now) it = incoming_fileshare_.erase(it);
+        else ++it;
+    }
+}
+
+quint64 Peer::sendFileShare(ds::protocol::Envelope envelope)
+{
+    expireFileShareRequests();
+    if (!fileShareReady()) throw Error("FileShare is not ready and bilaterally negotiated");
+    envelope.setProtocolVersion(codec::protocolVersion);
+    if (fileshare::isResponse(envelope)) {
+        const auto id = envelope.responseToRequestId();
+        send(envelope); // validates the original operation, path and result variant
+        incoming_fileshare_.erase(id);
+        return id;
+    }
+    if (!fileshare::isRequest(envelope)) throw Error("Expected FileShare control");
+    const auto count = std::count_if(outstandingRequests_.begin(), outstandingRequests_.end(),
+        [](const auto &item) { return item.second.type == RequestType::FileShare; });
+    if (count >= fileshare::max_pending_requests) throw Error("FileShare pending request limit reached");
+    const auto id = nextRequestId(RequestType::FileShare);
+    envelope.setRequestId(id);
+    auto &pending = outstandingRequests_.at(id);
+    pending.fileshare_request = envelope;
+    pending.expires = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    try { send(envelope); }
+    catch (...) { outstandingRequests_.erase(id); throw; }
+    if (envelope.hasCancelFileShareRequest()) {
+        auto it = outstandingRequests_.find(envelope.cancelFileShareRequest().requestToCancel());
+        if (it != outstandingRequests_.end() && it->second.type == RequestType::FileShare) it->second.cancelled = true;
+    }
+    return id;
+}
+
+void Peer::receiveFileShare(const ds::protocol::Envelope &envelope)
+{
+    if (!fileShareReady())
+        protocolError(QStringLiteral("FileShare control lacks bilateral negotiation or current service readiness"));
+    if (!fileshare::validateWire(codec::serialize(envelope)))
+        protocolError(QStringLiteral("FileShare control failed wire schema or size validation"));
+    if (!fileshare::validate(envelope, fileshare_utf8_() && peer_fileshare_utf8_))
+        protocolError(QStringLiteral("FileShare control failed correlation, presentation or result shape validation"));
+    expireFileShareRequests();
+    if (fileshare::isRequest(envelope)) {
+        const auto id = envelope.requestId();
+        if (id <= last_fileshare_request_ || incoming_fileshare_.size() >= fileshare::max_pending_requests)
+            protocolError(QStringLiteral("FileShare request replay or admission limit"));
+        last_fileshare_request_ = id;
+        PendingRequest pending{RequestType::FileShare,std::chrono::steady_clock::now() + std::chrono::seconds(30)};
+        pending.fileshare_request = envelope;
+        incoming_fileshare_.emplace(id,std::move(pending));
+    } else {
+        auto it = outstandingRequests_.find(envelope.responseToRequestId());
+        if (it == outstandingRequests_.end() || it->second.type != RequestType::FileShare ||
+            !fileshare::matches(it->second.fileshare_request,envelope))
+            protocolError(QStringLiteral("Unsolicited, expired or mismatched FileShare response"));
+        const bool cancelled = it->second.cancelled;
+        outstandingRequests_.erase(it);
+        if (cancelled) return; // late result cannot reactivate cancelled work
+    }
+    LFLOG_TRACE << "Dispatching validated FileShare control";
+    fileshare_dispatch_(envelope); // connection supplies identity/contact; no wire identity selector
+}
+
 void Peer::sendCapabilities()
 {
+    if (auto *engine = core::DsEngine::tryInstance())
+        emit engine->preparingPeerFeatures(shared_from_this());
     const auto preference = localCheckpointPreference();
     if (preference && !dsfm::validCheckpointInterval(preference))
         throw Error("Invalid local checkpoint preference");
     QStringList capabilities{QStringLiteral("file-chunks-v3"), QStringLiteral("keepalive-v3")};
     if (preference) capabilities.append(QStringLiteral("file-checkpoint-v1"));
+    advertised_fileshare_ = fileshare_ready_ && fileshare_dispatch_ && fileshare_utf8_ && fileshare_ready_();
+    if (advertised_fileshare_) capabilities.append(QStringLiteral("fileshare-v1"));
     send(codec::makeCapabilities(capabilities, static_cast<quint32>(max_record_bytes), preference));
+    capabilities_sent_ = true;
     advertised_checkpoint_interval_ = preference;
 }
 
@@ -1587,7 +1738,9 @@ quint32 Peer::bindTransfer(File &file, std::shared_ptr<TransferSession> session)
 
 bool Peer::transferWritable() const noexcept
 {
-    return isConnected() && connection_ && connection_->queuedBytes() < resourceLimits_.socketOutputBytes / 2;
+    // Control/chat sends run directly; payload yields after one bounded record.
+    // Contact's drain observer sends pending chat before transfer observers wake.
+    return isConnected() && connection_ && connection_->queuedBytes() == 0;
 }
 
 void Peer::releaseTransfer(File &file, bool completed, dsfm::DurableCheckpoint checkpoint,
@@ -1650,6 +1803,7 @@ void Peer::close()
                << getConnectionId().toString()
                << "; encrypted input state: " << static_cast<int>(inState_);
    inState_ = InState::CLOSING;
+   incoming_fileshare_.clear();
    while (!initial_offers_.empty()) forgetInitialOffer(initial_offers_.begin()->first);
    emit closeLater();
 }

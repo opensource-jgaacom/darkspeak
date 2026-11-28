@@ -13,6 +13,25 @@ UiDialog {
             width: root.availableWidth
             enabled: !shareMounts.busy
             Label { text: qsTr("Assignments make a source available for mounts. Neither assignment nor mounting grants contact access. This editor manages identity mounts only."); wrapMode: Text.WordWrap; Layout.fillWidth: true }
+            CheckBox {
+                id: remoteFileShareToggle
+                text: qsTr("Enable remote read-only FileShare for this identity (reconnect contacts after enabling)")
+                visible: typeof fileShareService !== "undefined"
+                checked: typeof fileShareService !== "undefined" && fileShareService.enabled(sharePermissions.identityId)
+                onClicked: fileShareService.setEnabled(sharePermissions.identityId, checked)
+                Connections {
+                    target: typeof fileShareService !== "undefined" ? fileShareService : null
+                    function onConfigurationChanged() { remoteFileShareToggle.checked = fileShareService.enabled(sharePermissions.identityId) }
+                }
+            }
+            Button {
+                text: qsTr("Permissions, groups and View as Contact…")
+                onClicked: {
+                    var component = Qt.createComponent("qrc:/SharePermissionsDialog.qml")
+                    var dialog = component.createObject(mainWindow, { "parent": mainWindow })
+                    dialog.open()
+                }
+            }
             Button { text: qsTr("Refresh"); onClicked: shareMounts.refresh() }
             Label { text: qsTr("Registered read-only sources"); font.bold: true }
             Repeater {

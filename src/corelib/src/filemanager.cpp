@@ -3,10 +3,14 @@
 #include <QSqlQuery>
 #include <QStorageInfo>
 #include <QCryptographicHash>
+#include <QTimer>
+#include "ds/contactmanager.h"
+#include <limits>
 
 #include "include/ds/filemanager.h"
 #include "ds/dsengine.h"
 #include "ds/resourcelimits.h"
+#include "ds/transfermanager.h"
 #include "ds/mediapreview.h"
 #include "ds/crypto.h"
 #include "ds/mimepreferences.h"
@@ -22,6 +26,11 @@ namespace core {
 FileManager::FileManager(QObject &parent, QSettings &settings)
     : QObject{&parent}, settings_{settings}, storage_{settings, this}
 {
+    connect(this, &FileManager::fileDeleted, &DsEngine::instance().transfers(),
+        [](int id) { DsEngine::instance().transfers().forgetWork(id); });
+    auto *timer = new QTimer(this); timer->setInterval(1000);
+    connect(timer, &QTimer::timeout, this, &FileManager::pruneDownloads); timer->start();
+    connect(&storage_, &ManagedStorage::shutdownStarted, this, [this, timer] { downloads_stopped_ = true; downloads_.clear(); timer->stop(); });
     connect(&storage_, &ManagedStorage::storageError, this, [] {
         DsEngine::instance().reportStatus(tr("File or media storage is unavailable. Check storage permissions and limits."), DsEngine::ERROR);
     });
@@ -148,7 +157,8 @@ File::ptr_t FileManager::addFile(std::unique_ptr<FileData> data, std::optional<d
     return file;
 }
 
-dsfm::Result<File::ptr_t> FileManager::addCatalogTransfer(Conversation& conversation, std::shared_ptr<dsvfs::CatalogExport> catalog) {
+dsfm::Result<File::ptr_t> FileManager::addCatalogTransfer(Conversation& conversation, std::shared_ptr<dsvfs::CatalogExport> catalog,
+                                                       bool enqueue) {
     auto contact = conversation.getParticipant();
     if (!contact || !catalog || !catalog->isAuthorized()
         || catalog->identity() != conversation.getIdentity()->getUuid()
@@ -161,8 +171,11 @@ dsfm::Result<File::ptr_t> FileManager::addCatalogTransfer(Conversation& conversa
     data->name = "catalog.jsonl"; data->mime_type = mime; data->hash = catalog->sha256(); data->size = qlonglong(catalog->size());
     auto file = addFile(std::move(data));
     auto bound = file->setCatalogSource(std::move(catalog));
-    if (!bound) { file->deleteFromDb(); return bound.error(); }
-    contact->queueFile(file); return file;
+    if (!bound) { LFLOG_TRACE << "VFS transfer failed stage=bind-prepared-source code=" << int(bound.error().code); file->deleteFromDb(); return bound.error(); }
+    auto registered = DsEngine::instance().transfers().bindWork(file, TransferPurpose::Catalog);
+    if (!registered) { file->deleteFromDb(); return registered.error(); }
+    if (enqueue) contact->queueFile(file);
+    return file;
 }
 
 QString FileManager::transferName(QString logical_name) {
@@ -179,21 +192,45 @@ QString FileManager::transferName(QString logical_name) {
 
 QCoro::Task<dsfm::Result<File::ptr_t>> FileManager::addVfsTransfer(Conversation& conversation,dsvfs::Vfs& vfs,
         dsvfs::NodeId node,dsvfs::Request request,QString mime_type) {
-    auto contact = conversation.getParticipant(); QPointer<Identity> identity = conversation.getIdentity(); const auto conversation_id = conversation.getId();
+    auto contact = conversation.getParticipant(); QPointer<Identity> identity = conversation.getIdentity();
     if (!identity || !contact || request.scope != contact->getUuid() || !contact->canSendFiles()) co_return dsfm::Error{dsfm::ErrorCode::PermissionDenied};
     if (mime_type == "*" || !validIdentityMimePreferences({mime_type})) co_return dsfm::Error{dsfm::ErrorCode::InvalidArgument};
     auto prepared = co_await vfs.prepareRead(identity->getUuid(),node,{},request); if (!prepared) co_return prepared.error();
-    const auto transfer_name = transferName(prepared.value().info.name);
-    if (!identity || !request.current() || !prepared.value().current || !prepared.value().current()
-        || !contact->canSendFileType(mime_type,transfer_name)) { co_await prepared.value().reader->close(); co_return dsfm::Error{dsfm::ErrorCode::PermissionDenied}; }
+    co_return addPreparedVfsTransfer(conversation, vfs, node, request, std::move(prepared).value(), mime_type, true);
+}
+
+dsfm::Result<File::ptr_t> FileManager::addPreparedVfsTransfer(Conversation& conversation, dsvfs::Vfs& vfs,
+        dsvfs::NodeId node, dsvfs::Request request, dsvfs::PreparedRead prepared, QString mime_type, bool enqueue) {
+    auto contact = conversation.getParticipant(); QPointer<Identity> identity = conversation.getIdentity();
+    const auto conversation_id = conversation.getId();
+    if (!identity || !contact || request.scope != contact->getUuid() || !contact->canSendFiles() ||
+        !prepared.reader || prepared.info.type != dsfm::EntryType::File || prepared.info.sha256.size() != 32 ||
+        prepared.info.size > quint64(std::numeric_limits<qlonglong>::max()) || mime_type == "*" || !validIdentityMimePreferences({mime_type}))
+        {
+        LFLOG_TRACE << "VFS transfer failed stage=prepared-context-validation identity=" << bool(identity)
+                    << " contact=" << bool(contact) << " scope=" << bool(contact && request.scope == contact->getUuid())
+                    << " preferences=" << bool(contact && contact->canSendFiles())
+                    << " contact-state=" << (contact ? int(contact->getState()) : -1)
+                    << " blocked=" << bool(contact && contact->isBlocked()) << " reader=" << bool(prepared.reader)
+                    << " regular=" << (prepared.info.type == dsfm::EntryType::File) << " expected-sha256-bytes=32 observed=" << prepared.info.sha256.size();
+        return dsfm::Error{dsfm::ErrorCode::PermissionDenied};
+    }
+    const auto transfer_name = transferName(prepared.info.name);
+    if (!identity || !request.current() || !prepared.current || !prepared.current()
+        || !contact->canSendFileType(mime_type,transfer_name)) {
+        LFLOG_TRACE << "VFS transfer failed stage=prepared-current-validation request=" << request.current()
+                    << " source=" << bool(prepared.current && prepared.current())
+                    << " preferences=" << contact->canSendFileType(mime_type,transfer_name);
+        return dsfm::Error{dsfm::ErrorCode::PermissionDenied};
+    }
     struct Source {
         QPointer<dsvfs::Vfs> vfs; QUuid identity; dsvfs::NodeId node; dsvfs::Request request;
         std::optional<dsvfs::PreparedRead> first; QByteArray sha256,lease; quint64 size=0;
         std::function<bool()> current;
     };
     auto source = std::make_shared<Source>(); source->vfs = &vfs; source->identity = identity->getUuid(); source->node = node; source->request = request;
-    source->sha256 = prepared.value().info.sha256; source->size = prepared.value().info.size; source->lease = prepared.value().resume_lease;
-    source->current = prepared.value().current; source->first.emplace(std::move(prepared).value());
+    source->sha256 = prepared.info.sha256; source->size = prepared.info.size; source->lease = prepared.resume_lease;
+    source->current = prepared.current; source->first.emplace(std::move(prepared));
     auto current = [source] { return source->vfs && source->request.current() && source->current && source->current(); };
     auto factory = [source](dsfm::ReadPreparationOptions options) -> QCoro::Task<dsfm::Result<dsfm::PreparedRead>> {
         if (options.cancel.cancelled()) co_return dsfm::Error{dsfm::ErrorCode::Cancelled};
@@ -215,12 +252,77 @@ QCoro::Task<dsfm::Result<File::ptr_t>> FileManager::addVfsTransfer(Conversation&
     auto data = std::make_unique<FileData>(); data->state = File::FS_WAITING; data->identity = identity->getId(); data->contact = contact->getId(); data->conversation = conversation_id;
     data->name = transfer_name; data->hash = source->sha256; data->size = qlonglong(source->size); data->mime_type = mime_type;
     auto file = addFile(std::move(data)); auto bound = file->setPreparedSource(source->identity,request.scope,current,factory);
-    if (!bound) { file->deleteFromDb(); co_return bound.error(); }
-    contact->queueFile(file); co_return file;
+    if (!bound) { LFLOG_TRACE << "VFS transfer failed stage=bind-prepared-source code=" << int(bound.error().code); file->deleteFromDb(); return bound.error(); }
+    auto registered = DsEngine::instance().transfers().bindWork(file, TransferPurpose::FileShare);
+    if (!registered) { file->deleteFromDb(); return registered.error(); }
+    if (enqueue) contact->queueFile(file);
+    return file;
 }
 
+void FileManager::pruneDownloads() {
+    downloads_.removeIf([](const auto &item) { return item.expires.hasExpired() || !item.current || !item.current(); });
+}
+dsfm::Result<void> FileManager::expectDownload(QUuid identity, QUuid contact_id, QUuid connection,
+        QByteArray transfer, std::optional<quint64> size, QByteArray sha256, std::function<bool()> current) {
+    if (downloads_stopped_) return dsfm::Error{dsfm::ErrorCode::ShuttingDown};
+    pruneDownloads();
+    if (identity.isNull() || contact_id.isNull() || connection.isNull() || transfer.size() != 16 ||
+        (!sha256.isEmpty() && sha256.size() != 32) || !current || !current()) return dsfm::Error{dsfm::ErrorCode::PermissionDenied};
+    if (downloads_.size() >= 32) return dsfm::Error{dsfm::ErrorCode::QueueFull};
+    for (const auto &item : downloads_)
+        if (item.identity == identity && item.contact == contact_id && item.transfer == transfer)
+            return dsfm::Error{dsfm::ErrorCode::Conflict};
+    auto contact = DsEngine::instance().getContactManager()->getContact(contact_id);
+    if (!contact || !contact->getIdentity() || contact->getIdentity()->getUuid() != identity)
+        return dsfm::Error{dsfm::ErrorCode::PermissionDenied};
+    if (!contact->canReceiveFileType("application/octet-stream")) return dsfm::Error{dsfm::ErrorCode::PermissionDenied};
+    // The ordinary offer may already have arrived on the socket before the GET
+    // coroutine resumes. Accept only its exact scope/connection/content identity.
+    if (auto file = getFileFromId(transfer, *contact, File::INCOMING)) {
+        if (!file->checkpointInterval() || file->offeredConnection() != connection || file->isThumbnail() ||
+            file->getMimeType() != "application/octet-stream" ||
+            (size && quint64(file->getSize()) != *size) || (!sha256.isEmpty() && file->getHash() != sha256))
+            return dsfm::Error{dsfm::ErrorCode::IntegrityError};
+        if (file->getState() == File::FS_QUEUED || file->getState() == File::FS_TRANSFERRING ||
+            file->getState() == File::FS_HASHING || file->getState() == File::FS_DONE) return {};
+        if (file->getState() != File::FS_OFFERED) return dsfm::Error{dsfm::ErrorCode::Conflict};
+        QString reason;
+        if (!canAcceptIncoming(*file, reason) || !contact->canReceiveFile(*file)) return dsfm::Error{dsfm::ErrorCode::PermissionDenied};
+        auto registered = DsEngine::instance().transfers().bindWork(file, TransferPurpose::FileShare);
+        if (!registered) return registered.error();
+        file->accept(); return {};
+    }
+    downloads_.append({identity, contact_id, connection, std::move(transfer), std::move(sha256), size, std::move(current)});
+    return {};
+}
+int FileManager::downloadConsent(Conversation &conversation, const PeerFileOffer &offer) {
+    pruneDownloads();
+    for (int i = 0; i < downloads_.size(); ++i) {
+        const auto &item = downloads_[i];
+        if (item.identity != conversation.getIdentity()->getUuid() ||
+            item.contact != conversation.getFirstParticipant()->getUuid() || item.transfer != offer.fileId) continue;
+        if (item.connection != offer.connectionId) return -1;
+        const bool matches = offer.checkpoint_attempt && offer.thumbnail_for.isEmpty() &&
+            offer.type == "application/octet-stream" && offer.size >= 0 &&
+            (!item.size || *item.size == quint64(offer.size)) && (item.sha256.isEmpty() || item.sha256 == offer.sha512);
+        downloads_.removeAt(i);
+        return matches ? 1 : -1;
+    }
+    return 0;
+}
 void FileManager::receivedFileOffer(Conversation& conversation, const PeerFileOffer &offer)
 {
+    const int requested = downloadConsent(conversation, offer);
+    if (requested < 0) {
+        LFLOG_TRACE << "FileShare requested offer rejected stage=connection/content-consent";
+        offer.peer->sendFileOfferResponse(offer.fileId, FileOfferResponseStatus::Rejected); return;
+    }
+    const bool catalog = offer.type == "application/vnd.darkspeak.vfs-catalog+jsonl";
+    if (catalog && (!incomingCatalogAdmission || !incomingCatalogAdmission(offer))) {
+        LFLOG_TRACE << "Catalog offer rejected at request/connection admission stage";
+        offer.peer->sendFileOfferResponse(offer.fileId, FileOfferResponseStatus::Rejected);
+        return;
+    }
     if (!offer.thumbnail_for.isEmpty()) {
         auto primary = getFileFromId(offer.thumbnail_for, *conversation.getFirstParticipant(), File::INCOMING);
         const auto* identity = conversation.getIdentity();
@@ -338,8 +440,13 @@ void FileManager::receivedFileOffer(Conversation& conversation, const PeerFileOf
 
     auto file = addFile(move(data), offer.checkpoint_attempt);
     if (file) {
-        if (file->isThumbnail()) {
-            file->accept(); // Explicit per-identity preview consent; never accepts the primary.
+        auto registered = DsEngine::instance().transfers().bindWork(file,
+            catalog ? TransferPurpose::Catalog : requested > 0 ? TransferPurpose::FileShare :
+            file->isThumbnail() ? TransferPurpose::Preview : TransferPurpose::Attachment);
+        if (!registered) { file->setState(File::FS_REJECTED); offer.peer->sendFileOfferResponse(offer.fileId,FileOfferResponseStatus::Rejected); return; }
+        if (catalog || requested > 0 || file->isThumbnail()) {
+            // Explicit GET/catalog request or per-identity preview consent.
+            file->accept();
             return;
         }
 

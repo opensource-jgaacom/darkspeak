@@ -11,6 +11,7 @@
 #include <QScopeGuard>
 #include <sys/stat.h>
 #include <algorithm>
+#include <utility>
 
 namespace ds::core {
 namespace {
@@ -94,18 +95,20 @@ QString problem(ErrorCode code) {
 ReadOnlyResources::ReadOnlyResources(QString registry, Host host, QObject *parent)
     : QAbstractListModel(parent), registry_(std::move(registry)), host_(std::move(host)) {
     timer_.setInterval(2000);
-    connect(&timer_, &QTimer::timeout, this, [this] { if (loaded_ && !busy_ && !failed_load_) inspect(); });
+    connect(&timer_, &QTimer::timeout, this, [this] { if (loaded_ && !busy_ && !failed_load_) inspect(true); });
 }
 ReadOnlyResources::~ReadOnlyResources() = default;
 int ReadOnlyResources::rowCount(const QModelIndex &parent) const { return parent.isValid() ? 0 : sources_.size(); }
 QHash<int, QByteArray> ReadOnlyResources::roleNames() const {
     return {{ResourceId, "resourceId"}, {Name, "sourceName"}, {Path, "sourcePath"}, {Status, "sourceStatus"},
-        {Problem, "sourceError"}, {Symlinks, "symlinkPolicy"}, {Verification, "verificationPolicy"}, {Exclusions, "exclusions"}};
+        {Problem, "sourceError"}, {Symlinks, "symlinkPolicy"}, {Verification, "verificationPolicy"}, {Exclusions, "exclusions"}, {FileCount, "fileCount"}, {Size, "sourceSize"}};
 }
 QVariant ReadOnlyResources::data(const QModelIndex &index, int role) const {
     if (!index.isValid() || index.row() < 0 || index.row() >= sources_.size()) return {};
     const auto &source = sources_[index.row()];
     switch (role) {
+    case FileCount: return source.usage ? QVariant::fromValue(source.usage->files) : QVariant{};
+    case Size: return source.usage ? QVariant::fromValue(source.usage->bytes) : QVariant{};
     case ResourceId: return idText(source.config.common.id);
     case Name: return source.name;
     case Path: return source.config.common.storage_root;
@@ -117,19 +120,42 @@ QVariant ReadOnlyResources::data(const QModelIndex &index, int role) const {
     default: return {};
     }
 }
-bool ReadOnlyResources::begin() {
+bool ReadOnlyResources::begin(bool background) {
     if (busy_ || stopping_) return false;
-    busy_ = true; error_.clear(); error_code_ = -1; emit stateChanged(); return true;
+    busy_ = true;
+    silent_inspection_ = background;
+    if (!background) { error_.clear(); error_code_ = -1; emit stateChanged(); }
+    return true;
 }
-void ReadOnlyResources::end() { busy_ = false; emit stateChanged(); }
+void ReadOnlyResources::end() {
+    const auto silent = silent_inspection_;
+    busy_ = false;
+    silent_inspection_ = false;
+    auto pending = std::exchange(pending_command_, {});
+    if (!silent) emit stateChanged();
+    if (pending) {
+        if (stopping_) emit stateChanged();
+        else pending();
+    }
+}
+void ReadOnlyResources::runCommand(std::function<void()> command) {
+    if (stopping_) return;
+    if (busy_ && silent_inspection_) {
+        // At most one local action waits for the current poll. busy() disables
+        // further actions until it runs; never mutate rows across poll awaits.
+        if (!pending_command_) { pending_command_ = std::move(command); emit stateChanged(); }
+        return;
+    }
+    command();
+}
 void ReadOnlyResources::fail(Error error, QString message) {
     LFLOG_DEBUG << "Read-only storage administration failed, code=" << int(error.code);
     error_ = std::move(message); error_code_ = int(error.code); emit stateChanged();
 }
 void ReadOnlyResources::stop() { stopping_ = true; timer_.stop(); }
-void ReadOnlyResources::refresh() { if (!loaded_ || failed_load_) load(); else inspect(); }
-void ReadOnlyResources::add() { create(); }
-void ReadOnlyResources::remove(QString id) { erase(QUuid(id)); }
+void ReadOnlyResources::refresh() { runCommand([this] { if (!loaded_ || failed_load_) load(); else inspect(); }); }
+void ReadOnlyResources::add() { runCommand([this] { create(); }); }
+void ReadOnlyResources::remove(QString id) { runCommand([this, id = QUuid(id)] { erase(id); }); }
 void ReadOnlyResources::discardDraft() {
     draft_name_.clear(); draft_path_.clear(); draft_exclusions_.clear(); draft_symlinks_ = 0; draft_verification_ = 0; emit draftChanged();
 }
@@ -188,8 +214,8 @@ QCoro::Task<void> ReadOnlyResources::load() {
     if (!stopping_) timer_.start();
     co_await inspect();
 }
-QCoro::Task<void> ReadOnlyResources::inspect() {
-    if (!begin()) co_return;
+QCoro::Task<void> ReadOnlyResources::inspect(bool background) {
+    if (!begin(background)) co_return;
     auto lifetime = host_.hold ? host_.hold() : nullptr;
     auto finish = qScopeGuard([this] { end(); });
     QStringList paths; for (const auto &source : sources_) paths.append(source.config.common.storage_root);
@@ -197,26 +223,45 @@ QCoro::Task<void> ReadOnlyResources::inspect() {
     auto checked = co_await work<QSet<int>>([paths] { return conflicts(paths); });
     for (int i = 0; i < sources_.size(); ++i) {
         auto &source = sources_[i];
+        // Keep published values stable across awaits. Commit one snapshot below
+        // and notify only the roles whose values actually changed.
+        auto next = source;
+        next.usage.reset();
         if (!checked || checked.value().contains(i)) {
-            if (source.opened) {
-                auto closed = co_await host_.close(source.config.common.id);
+            if (next.opened) {
+                auto closed = co_await host_.close(next.config.common.id);
                 if (!closed) { fail(closed.error(), problem(closed.error().code)); }
-                else source.opened = false;
+                else next.opened = false;
             }
-            source.status = tr("Conflict / unavailable");
-            source.problem = problem(checked ? ErrorCode::Conflict : checked.error().code);
+            next.status = tr("Conflict / unavailable");
+            next.problem = problem(checked ? ErrorCode::Conflict : checked.error().code);
         } else {
-            auto info = source.opened ? co_await host_.info(source.config.common.id) : co_await host_.open(source.config, false);
-            if (!info) { source.status = tr("Unavailable"); source.problem = problem(info.error().code); }
+            auto info = next.opened ? co_await host_.info(next.config.common.id) : co_await host_.open(next.config, false);
+            if (!info) { next.status = tr("Unavailable"); next.problem = problem(info.error().code); }
             else {
-                source.opened = true;
-                source.status = info.value().status == NamespaceStatus::Ready ? tr("Ready") : info.value().status == NamespaceStatus::Updating ? tr("Indexing") : tr("Failed");
-                source.problem = info.value().readiness_error ? problem(info.value().readiness_error->code) : QString{};
-                auto config = co_await host_.config(source.config.common.id);
-                if (config) source.effective_exclusions = config.value().exclusions.directory_roots.join('\n');
+                if (host_.usage) {
+                    auto usage = co_await host_.usage(next.config.common.id);
+                    if (usage) next.usage = usage.value();
+                }
+                next.opened = true;
+                next.status = info.value().status == NamespaceStatus::Ready ? tr("Ready") : info.value().status == NamespaceStatus::Updating ? tr("Indexing") : tr("Failed");
+                next.problem = info.value().readiness_error ? problem(info.value().readiness_error->code) : QString{};
+                auto config = co_await host_.config(next.config.common.id);
+                if (config) next.effective_exclusions = config.value().exclusions.directory_roots.join('\n');
             }
         }
-        emit dataChanged(index(i), index(i));
+        QList<int> roles;
+        if (source.status != next.status) roles.append(Status);
+        if (source.problem != next.problem) roles.append(Problem);
+        if (source.effective_exclusions != next.effective_exclusions) roles.append(Exclusions);
+        if (source.usage.has_value() != next.usage.has_value()) {
+            roles.append(FileCount); roles.append(Size);
+        } else if (source.usage && next.usage) {
+            if (source.usage->files != next.usage->files) roles.append(FileCount);
+            if (source.usage->bytes != next.usage->bytes) roles.append(Size);
+        }
+        source = std::move(next);
+        if (!roles.isEmpty()) emit dataChanged(index(i), index(i), roles);
     }
 }
 QCoro::Task<void> ReadOnlyResources::create() {
@@ -227,8 +272,9 @@ QCoro::Task<void> ReadOnlyResources::create() {
     Source source; source.name = draft_name_.trimmed();
     source.config.common.id = QUuid::createUuid();
     source.config.common.storage_root = QDir::cleanPath(draft_path_);
+    if (source.name.isEmpty()) source.name = QDir(source.config.common.storage_root).dirName();
     source.config.exclusions.directory_roots = draft_exclusions_.split('\n', Qt::SkipEmptyParts);
-    if (sources_.size() >= maximum_sources || source.name.isEmpty() || source.name.size() > 128 || source.name.contains(QChar::Null)
+    if (sources_.size() >= maximum_sources || source.name.isEmpty() || source.name.size() > 128 || !source.name.isValidUtf16() || source.name.contains(QChar::Null)
         || !validPath(draft_path_) || draft_symlinks_ < 0 || draft_symlinks_ > 2 || draft_verification_ < 0 || draft_verification_ > 2
         || source.config.exclusions.directory_roots.size() > 64) { fail(Error{ErrorCode::InvalidArgument}, problem(ErrorCode::InvalidArgument)); co_return; }
     for (auto &path : source.config.exclusions.directory_roots) {
@@ -267,6 +313,31 @@ QCoro::Task<void> ReadOnlyResources::create() {
     beginInsertRows({}, sources_.size(), sources_.size()); sources_.append(source); endInsertRows();
     LFLOG_DEBUG << "Read-only source registration committed";
     discardDraft();
+}
+void ReadOnlyResources::rename(QString id, QString name) {
+    runCommand([this, id = QUuid(id), name = std::move(name)] { renameSource(id, name); });
+}
+QCoro::Task<void> ReadOnlyResources::renameSource(QUuid id, QString name) {
+    if (!begin()) co_return;
+    auto lifetime = host_.hold ? host_.hold() : nullptr;
+    auto finish = qScopeGuard([this] { end(); });
+    if (!loaded_ || failed_load_) { fail(Error{ErrorCode::Busy}, tr("Refresh the storage registry before editing a source.")); co_return; }
+    auto found = std::find_if(sources_.cbegin(), sources_.cend(), [id](const auto &source) { return source.config.common.id == id; });
+    if (id.isNull() || found == sources_.cend()) { fail(Error{ErrorCode::MissingEntry}, tr("Refresh and select an existing source.")); co_return; }
+    name = name.trimmed();
+    if (name.isEmpty()) name = QDir(found->config.common.storage_root).dirName();
+    if (name.isEmpty() || name.size() > 128 || !name.isValidUtf16() || name.contains(QChar::Null)) {
+        fail(Error{ErrorCode::InvalidName}, problem(ErrorCode::InvalidName)); co_return;
+    }
+    const auto row = int(std::distance(sources_.cbegin(), found));
+    auto next = sources_; next[row].name = name;
+    auto saved = co_await save(next);
+    if (!saved) { fail(saved.error(), problem(saved.error().code)); co_return; }
+    if (sources_[row].name != name) {
+        sources_[row].name = name;
+        emit dataChanged(index(row), index(row), {Name});
+    }
+    LFLOG_DEBUG << "Read-only source name updated";
 }
 QCoro::Task<void> ReadOnlyResources::erase(QUuid id) {
     if (!begin()) co_return;

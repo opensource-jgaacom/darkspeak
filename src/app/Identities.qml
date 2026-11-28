@@ -147,9 +147,16 @@ Page {
 
         function openFileShare() {
             shareMounts.selectIdentity(currentIdentity.uuid);
+            sharePermissions.selectIdentity(currentIdentity.uuid);
             var component = Qt.createComponent("qrc:/ShareMountDialog.qml");
             var dlg = component.createObject(mainWindow, { "parent": mainWindow });
             dlg.open();
+        }
+
+        function browseFiles() {
+            var component = Qt.createComponent("qrc:/FileBrowserDialog.qml");
+            var dialog = component.createObject(mainWindow, { "parent": mainWindow, "identityId": currentIdentity.uuid });
+            dialog.open();
         }
 
         function editCurrent() {
@@ -219,8 +226,18 @@ Page {
 
         MenuItem {
             text: qsTr("FileShare…")
-            enabled: !shareMounts.busy
+            enabled: !shareMounts.busy && !sharePermissions.busy
             onTriggered: list.openFileShare()
+        }
+        MenuItem {
+            text: qsTr("Transfers")
+            enabled: list.currentIdentity !== null
+            onTriggered: mainWindow.openTransfers(list.currentIdentity.uuid, "", list.currentIdentity.name, "")
+        }
+        MenuItem {
+            text: qsTr("Browse local files…")
+            enabled: list.currentIdentity !== null
+            onTriggered: list.browseFiles()
         }
 
         MenuItem {

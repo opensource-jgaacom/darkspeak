@@ -11,6 +11,11 @@ add_library(${PROJECT_NAME} STATIC
     src/connectionsocket.cpp
     src/peer.cpp
     src/protocolcodec.cpp
+    src/filesharecodec.cpp
+    src/remotecatalogs.cpp
+    include/ds/remotecatalogs.h
+    src/fileshareservice.cpp
+    include/ds/fileshareservice.h
     include/ds/dsserver.h
     include/ds/protmanager.h
     include/ds/peer.h
@@ -20,6 +25,7 @@ add_library(${PROJECT_NAME} STATIC
     include/ds/dsclient.h
     include/ds/handshake.h
     include/ds/protocolcodec.h
+    include/ds/filesharecodec.h
     include/ds/torsocketlistener.h
     include/ds/torserviceinterface.h
 )

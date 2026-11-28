@@ -1,4 +1,5 @@
 #include "ds/protocolcodec.h"
+#include "ds/filesharecodec.h"
 
 #include <QRegularExpression>
 #include <QCryptographicHash>
@@ -44,7 +45,7 @@ QByteArray serialize(const ds::protocol::Envelope& envelope)
 
 bool deserialize(QByteArrayView bytes, ds::protocol::Envelope& envelope)
 {
-    return decode(bytes, envelope);
+    return fileshare::validateWire(bytes) && decode(bytes, envelope);
 }
 
 QByteArray serialize(const ds::protocol::TransportEnvelope& envelope)
@@ -177,8 +178,12 @@ bool validateFileCheckpoint(const ds::protocol::FileCheckpoint &c, quint64 size,
 }
 bool validateFilePause(const ds::protocol::FilePause &p, quint64 size, quint32 interval) {
     const auto reason=int(p.reason());
-    return p.fileId().size()==16 && p.fileId()!=QByteArray(16,'\0') && p.attemptId().size()==16 && p.attemptId()!=QByteArray(16,'\0') &&
-        reason>=1 && reason<=6 && p.hasConfirmedCheckpoint() && validateCheckpointReference(p.confirmedCheckpoint(),size,interval);
+    const auto phase=int(p.phase());
+    if (p.version()!=1 || phase<1 || phase>4 || p.fileId().size()!=16 || p.fileId()==QByteArray(16,'\0') ||
+        p.attemptId().size()!=16 || p.attemptId()==QByteArray(16,'\0') || reason<1 || reason>6 ||
+        !p.hasConfirmedCheckpoint() || !validateCheckpointReference(p.confirmedCheckpoint(),size,interval)) return false;
+    return phase==1 || (reason==6 && !p.confirmedCheckpoint().final() && !p.confirmedCheckpoint().pauseBoundary() &&
+        (phase==2 || (p.confirmedCheckpoint().nextOffset()>0 && p.confirmedCheckpoint().nextOffset()<size)));
 }
 
 } // namespace ds::prot::codec

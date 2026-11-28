@@ -25,20 +25,23 @@ public:
         std::function<QCoro::Task<dsfm::Result<void>>(dsfm::NamespaceId)> remove;
         std::function<QCoro::Task<dsfm::Result<dsfm::ReadOnlyNamespaceConfig>>(dsfm::NamespaceId)> config;
         std::function<QCoro::Task<dsfm::Result<dsfm::NamespaceInfo>>(dsfm::NamespaceId)> info;
+        std::function<QCoro::Task<dsfm::Result<dsfm::ReadOnlySourceUsage>>(dsfm::NamespaceId)> usage;
     };
-    enum Role { ResourceId = Qt::UserRole + 1, Name, Path, Status, Problem, Symlinks, Verification, Exclusions };
+    enum Role { ResourceId = Qt::UserRole + 1, Name, Path, Status, Problem, Symlinks, Verification, Exclusions, FileCount, Size };
     ReadOnlyResources(QString registry, Host host, QObject *parent = nullptr);
     ~ReadOnlyResources() override;
     int rowCount(const QModelIndex &parent = {}) const override;
     QVariant data(const QModelIndex &index, int role) const override;
     QHash<int, QByteArray> roleNames() const override;
-    bool busy() const { return busy_; }
+    bool busy() const { return (busy_ && !silent_inspection_) || bool(pending_command_); }
     QString error() const { return error_; }
     int errorCode() const { return error_code_; }
     Q_INVOKABLE void refresh();
     Q_INVOKABLE void add();
     Q_INVOKABLE void remove(QString id);
     Q_INVOKABLE void discardDraft();
+    Q_INVOKABLE void rename(QString id, QString name);
+    QCoro::Task<void> renameSource(QUuid id, QString name);
     void stop();
     QCoro::Task<void> load();
     QCoro::Task<void> create();
@@ -54,11 +57,13 @@ private:
         QString problem;
         QString effective_exclusions;
         bool opened = false;
+        std::optional<dsfm::ReadOnlySourceUsage> usage;
     };
-    QCoro::Task<void> inspect();
+    QCoro::Task<void> inspect(bool background = false);
+    void runCommand(std::function<void()> command);
     QCoro::Task<dsfm::Result<void>> save(const QVector<Source> &sources);
     void fail(dsfm::Error error, QString message);
-    bool begin();
+    bool begin(bool background = false);
     void end();
     QString registry_;
     Host host_;
@@ -66,6 +71,8 @@ private:
     QTimer timer_;
     bool loaded_ = false;
     bool busy_ = false;
+    bool silent_inspection_ = false;
+    std::function<void()> pending_command_;
     bool failed_load_ = false;
     bool stopping_ = false;
     QString error_;

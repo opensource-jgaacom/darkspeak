@@ -15,7 +15,10 @@ public:
     IncomingTransfer(File::ptr_t file, PeerConnection::ptr_t peer, Start start,
                      QDeadlineTimer deadline = QDeadlineTimer{QDeadlineTimer::Forever});
     ~IncomingTransfer() override;
+    bool reconciliationOnly() const override { return start_ == Start::Completed || start_ == Start::PublishedRecovery; }
+    bool supportsCooperativePause() const override { return !completed_content_; }
 protected:
+    void cooperativePauseRequested() override;
     QCoro::Task<Outcome> execute() override;
     QCoro::Task<Outcome> finalize(Outcome outcome) override;
 private:
@@ -35,6 +38,7 @@ private:
     std::vector<QMetaObject::Connection> observers_;
     quint64 sequence_ = 0, offset_ = 0, final_start_ = 0;
     bool completed_content_ = false;
+    bool cooperative_paused_ = false;
 };
 
 } // namespace ds::core

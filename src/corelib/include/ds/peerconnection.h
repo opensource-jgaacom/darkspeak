@@ -361,6 +361,9 @@ public:
     virtual uint64_t sendFilePause(const QByteArray &, QUuid, dsfm::DurableCheckpoint, dsfm::TransferPauseReason) {
         throw std::runtime_error("Checkpoint pauses are unsupported");
     }
+    virtual uint64_t sendCooperativePause(const QByteArray &, QUuid, dsfm::DurableCheckpoint, int) {
+        throw std::logic_error("Cooperative checkpoint pauses are unsupported");
+    }
     virtual quint32 checkpointInterval() const noexcept { return 0; }
     virtual uint64_t sendUserInfo(const core::UserInfo &userInfo) = 0;
     virtual uint64_t requestBio() = 0;

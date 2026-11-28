@@ -106,10 +106,32 @@ run cmake -S "$project_dir" -B "$test_build_dir" -DCMAKE_BUILD_TYPE=Debug "$@" \
 # subscriptions, including cross-thread delivery and cancellation, plus shared
 # status/hash/capability metadata and Linux filename encoding. No extra flags
 # or dependencies are required.
+# remote_catalogs covers request/connection isolation and validated private cache publication.
+# portable_catalog covers portable v2 metadata, strict presentation and SHA-256 validation.
 # The vfs CTest target includes assignment, overlay, permission and mount-scoped
 # composition, catalog formats/exports, revocation and alias privacy. Its host
 # Home-pane and ordinary-transfer integration is also in managed_storage.
+# recursive_cycles checks resolved target cycle/alias bounds and source identity changes.
 # protocol_v3 also checks deferred socket destruction during local disconnects.
+# fileshare_protocol covers bounded v1 controls, strict path decoding, negotiation,
+# authenticated output, correlation, cancellation and request admission/expiry.
+# fileshare_service covers the production VFS-backed remote LIST/STAT controller,
+# encrypted Peer dispatch, cursor isolation, empty pages, revocation and bounded admission.
+# fileshare_recursive_service checks recursion refusal/direct fallback, complete filtered catalogs and publication fences.
+# fileshare_get checks LIST/STAT-selected GET, hostile inputs, revocation/resume and generic checkpointed bytes.
+# file_browser checks the shared Local/Remote model/providers and QML with isolated settings/storage.
+# browser_navigation checks breadcrumbs/history, listing states, stale replies and scoped offline metadata.
+# transfer_scheduling and transport_priority cover trusted/fair admission, durable local priority,
+# scoped commands, cleanup and bounded chat-before-payload socket scheduling (no extra flags).
+# transfer_queue_model covers shared scoped Transfers UI, journal progress and queue commands (no extra flags).
+# transfer_preemption covers cooperative checkpoint fences, resume integrity and bounded priority yielding (no extra flags).
+# queue_integration covers conversation card/shared scoped queue commands and durable intent (no extra flags).
+# transfer_work covers the durable global registry, queue admission, checkpoint recovery and payload SHA-256.
+# browser_smoke combines real providers, slow pages, QML batch GET/denial and location fences.
+# browser_selection checks bounded stable selection, context actions, GET batches and scoped generic-offer consent.
+# browser_paging checks viewport backpressure, bounded grouped pages/live invalidations and 100k virtualization.
+# browser_views checks shared display modes, safe type icons, columns and isolated persisted preferences.
+# catalog_transfer checks generic checkpointed catalog bytes and private validated-cache publication.
 # transfer_checkpoints covers durable progress and accounting-independent backpressure.
 # transfer_session covers bounded owner events, shared admission and joined cancellation.
 # managed_storage also reclaims offer admission slots through reloaded File lifecycles.
@@ -118,8 +140,13 @@ run cmake -S "$project_dir" -B "$test_build_dir" -DCMAKE_BUILD_TYPE=Debug "$@" \
 # temporary_artifacts covers private publication, lease isolation and recovery.
 # storage_pool covers shared capacity admission, reservation recovery and owner locks.
 # readonly_filemanager covers external sources, exclusion/authorization alias
+# share_administration covers the combined QML registration/assignment/mount/grant flow,
+# full model/backend restart, confinement, visible errors and live reader withdrawal.
+# share_permissions covers scoped rules, general membership, View as Contact and active revocation.
 # share_mounts covers identity assignments, mount CRUD, confinement, persistence and QML.
-# readonly_resources covers global registration/status/removal, persistence,
+# readonly_resources covers global registration/status/removal, default names,
+# indexed file counts/bytes, persistent rename, quiet polling with changed-role
+# notifications, queued actions during polls, and registry persistence,
 # overlap/exclusion validation and the production QML storage dialog/model.
 # storage_diagnostics checks TRACE failure sites, schema/limit validation,
 # SQL preparation errors/native codes and redaction of catalog values.

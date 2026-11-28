@@ -220,6 +220,10 @@ public:
     virtual QCoro::Task<Result<DirectorySubscription>> subscribeDirectory(
         NamespaceId ns, DirectoryId directory,
         DirectoryChangeCallback callback);
+    // Private resolved directory key for cycle-safe recursive composition.
+    // Default fails UnsupportedCapability; never expose this key to peers.
+    virtual QCoro::Task<Result<QByteArray>> directoryIdentity(
+        NamespaceId ns, DirectoryId directory, AccessContext access);
     virtual QCoro::Task<Result<MutationResult>> rename(
         NamespaceId ns, QUuid id, QString name) = 0;
     virtual QCoro::Task<Result<MutationResult>> move(
@@ -233,6 +237,8 @@ public:
     virtual QCoro::Task<Result<void>> shutdown() = 0;
 };
 ```
+
+`directoryIdentity` reauthorizes and revalidates the actual directory target on each call. Equal physical targets return equal bounded private keys across namespace and mount aliases; unknown or unsafe target identity fails closed. Managed native directories use their namespace and stable catalog directory UUID (no aliases); the read-only Linux backend uses the opened target's device/inode, with exclusions, assignment boundaries and live generation checks. Recursive VFS consumers keep authorization routes separate from these deduplication keys.
 
 `NamespaceInfo` returns persisted configuration, root ID, limits/usage, supported visibility/durability capabilities, `NamespaceStatus status`, optional `readiness_error`, and common `Capabilities` flags (`Read`, `Write`, `PreparedRead`, `DirectorySubscriptions`, `SnapshotReads`, `ResumeLeases`, optional `TemporaryArtifacts`). Report only implemented capabilities. The managed native backend reports `Ready` after recovery and supports the established first four flags; it advertises `TemporaryArtifacts` only after the optional lifecycle/reservation extension is actually implemented and tested, and does not advertise snapshots or retained resume leases without support. Metadata validation and hash availability are distinct: an externally indexed `Available` file may have `HashState::Missing` until preparation. `Stale` and `Computing` hashes cannot be announced as valid. Native committed files expose `Verified` hashes while available; directories have `Missing` hash state. Entry status integer values are explicit and covered by catalog regression fixtures. Expose bounded enumeration of opened namespaces/roots. Creation refuses existing unmanaged contents; opening does not import them. Native storage locations are backend configuration, never required for content access.
 

@@ -484,13 +484,13 @@ class MemoryReader final : public IFileReader {
 };
 void formatsAndBounds() {
     Fixture f;
-    QFile fixture(QStringLiteral(VFS_FIXTURES) + "/catalog-v1.jsonl");
+    QFile fixture(QStringLiteral(VFS_FIXTURES) + "/catalog-v2.jsonl");
     CHECK(fixture.open(QIODevice::ReadOnly));
     auto bytes = fixture.readAll();
     auto reader = std::make_shared<MemoryReader>(bytes);
     get(f.vfs->validateCatalog(reader, bytes.size(), QCryptographicHash::hash(bytes, QCryptographicHash::Sha256)));
     auto hostile = bytes;
-    hostile.replace("\"version\":1", "\"version\":2");
+    hostile.replace("\"version\":2", "\"version\":3");
     error(f.vfs->validateCatalog(std::make_shared<MemoryReader>(hostile), hostile.size(),
                                  QCryptographicHash::hash(hostile, QCryptographicHash::Sha256)),
           ErrorCode::Corruption);

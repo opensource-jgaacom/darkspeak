@@ -400,6 +400,10 @@ public:
     virtual bool supportsStableEnumeration() const noexcept { return false; }
     virtual QCoro::Task<Result<void>> discardDirectoryCursor(NamespaceId ns, QByteArray cursor);
     virtual QCoro::Task<Result<AccessContext>> descendantAccess(NamespaceId ns, DirectoryId directory, AccessContext access);
+    // Private stable resolved target key for bounded recursive traversal, never wire metadata.
+    // Equal underlying directories must return equal keys across mount/namespace aliases.
+    // Unknown backends fail closed; authorization and source identity are rechecked on every call.
+    virtual QCoro::Task<Result<QByteArray>> directoryIdentity(NamespaceId ns, DirectoryId directory, AccessContext access);
     virtual QCoro::Task<Result<TemporaryFile>> beginTemporary(NamespaceId ns, TemporaryOptions options, TemporaryAccess access);
     virtual QCoro::Task<Result<TemporaryInfo>> finalizeTemporary(NamespaceId ns, TempId id, TemporaryAccess access, CancellationToken cancel = {});
     virtual QCoro::Task<Result<TemporaryRead>> leaseTemporary(NamespaceId ns, TempId id, TemporaryLeaseOptions options, TemporaryAccess access);
@@ -473,6 +477,7 @@ public:
     Result<quint64> subscribe(NamespaceId ns, QObject* context, std::function<void(Change)> callback) override;
     void unsubscribe(quint64 subscription) override;
     QCoro::Task<Result<void>> shutdown() override;
+    QCoro::Task<Result<QByteArray>> directoryIdentity(NamespaceId ns, DirectoryId directory, AccessContext access) override;
 protected:
     FilesystemGuard filesystemGuard(NamespaceId ns, QUuid id, std::function<bool(FilesystemIdentity)> check) override;
 private:

@@ -27,6 +27,10 @@ struct ReadOnlyNamespaceConfig {
     ExclusionPolicy exclusions;
     ReadOnlyLimits limits;
 };
+struct ReadOnlySourceUsage {
+    quint64 files = 0;
+    quint64 bytes = 0;
+};
 class ReadOnlyFileManager final : public IFileManager {
 public:
     struct Impl;
@@ -62,6 +66,8 @@ public:
     // Offline rebuild: preserves one owner-only catalog directory backup; never touches source data.
     QCoro::Task<Result<NamespaceInfo>> reindexSource(ReadOnlyNamespaceConfig config, CancellationToken cancel = {});
     QCoro::Task<Result<void>> updateExclusions(NamespaceId ns, ExclusionPolicy policy);
+    // Local administration only: indexed available regular files, not physical disk usage.
+    QCoro::Task<Result<ReadOnlySourceUsage>> sourceUsage(NamespaceId ns);
     QCoro::Task<Result<void>> closeSource(NamespaceId ns);
     // Explicit local unregister: only this namespace's private index is removed.
     // A reindex backup is retained and causes Conflict, requiring operator care.
@@ -76,6 +82,7 @@ public:
     bool supportsStableEnumeration() const noexcept override { return true; }
     QCoro::Task<Result<void>> discardDirectoryCursor(NamespaceId ns, QByteArray cursor) override;
     QCoro::Task<Result<AccessContext>> descendantAccess(NamespaceId ns, DirectoryId directory, AccessContext access) override;
+    QCoro::Task<Result<QByteArray>> directoryIdentity(NamespaceId ns, DirectoryId directory, AccessContext access) override;
 private:
     QCoro::Task<Result<FileInfo>> statImpl(NamespaceId ns, QUuid id, AccessContext access);
     QCoro::Task<Result<FileInfo>> lookupImpl(NamespaceId ns, QString path, AccessContext access);

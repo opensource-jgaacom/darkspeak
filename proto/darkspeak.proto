@@ -60,6 +60,14 @@ message Envelope {
     FileOfferResponse file_offer_response = 27;
     FileCheckpoint file_checkpoint = 30;
     FilePause file_pause = 31;
+    ListDirectoryRequest list_directory_request = 32;
+    ListDirectoryResult list_directory_result = 33;
+    StatVirtualRequest stat_virtual_request = 34;
+    StatVirtualResult stat_virtual_result = 35;
+    RequestDownload request_download = 36;
+    RequestDownloadResult request_download_result = 37;
+    CancelFileShareRequest cancel_file_share_request = 38;
+    CancelFileShareResult cancel_file_share_result = 39;
   }
 }
 
@@ -524,11 +532,20 @@ enum FilePauseReason {
   TRANSFER_FEATURE_PAUSED = 6;
 }
 message FilePause {
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    NOTICE = 1;
+    REQUEST = 2;
+    FENCED = 3;
+    ACK = 4;
+  }
   bytes file_id = 1;
   bytes attempt_id = 2;
   FilePauseReason reason = 3;
   // Advisory only; cannot advance a durable/chargeable checkpoint by itself.
   CheckpointReference confirmed_checkpoint = 4;
+  uint32 version = 5; // Exactly 1; all phases are mandatory current semantics.
+  Phase phase = 6;
 }
 
 // Requests the current avatar from the server
@@ -557,3 +574,79 @@ message Avatar {
   bytes green = 4;
   bytes blue = 5;
 }
+
+// fileshare-v1: authenticated controls only; paths are never native OS paths.
+// Hard bounds: 4096 encoded path bytes, 64 components, 765 logical bytes per
+// component (2295 escaped), 100 entries/page, 2048 cursor bytes, 32-byte opaque
+// wire node IDs, 16-byte transfer IDs, 32-byte SHA-256, 30-second requests.
+// Node IDs are view-scoped opaque references, never backend IDs or authority.
+enum VirtualPathEncoding {
+  VIRTUAL_PATH_ENCODING_UNSPECIFIED = 0;
+  VIRTUAL_PATH_UTF8 = 1;
+  VIRTUAL_PATH_ASCII_ESCAPED = 2;
+}
+message VirtualPath { VirtualPathEncoding encoding = 1; string path = 2; }
+message VirtualName { VirtualPathEncoding encoding = 1; string value = 2; }
+enum FileShareStatus {
+  FILESHARE_STATUS_UNSPECIFIED = 0;
+  FILESHARE_OK = 1;
+  FILESHARE_DENIED_OR_NOT_FOUND = 2;
+  FILESHARE_RECURSION_REFUSED = 3;
+  FILESHARE_INVALID_REQUEST = 4;
+  FILESHARE_STALE_CURSOR = 5;
+  FILESHARE_BUSY = 6;
+  FILESHARE_UNSUPPORTED = 7;
+  FILESHARE_CHANGED = 8;
+  FILESHARE_INTERNAL_ERROR = 9;
+}
+enum VirtualEntryType {
+  VIRTUAL_ENTRY_TYPE_UNSPECIFIED = 0;
+  VIRTUAL_FILE = 1;
+  VIRTUAL_DIRECTORY = 2;
+}
+enum VirtualEntryState {
+  VIRTUAL_ENTRY_STATE_UNSPECIFIED = 0;
+  VIRTUAL_ENTRY_READY = 1;
+  VIRTUAL_ENTRY_UPDATING = 2;
+}
+message DirectoryEntry {
+  bytes node_id = 1;
+  VirtualName name = 2;
+  VirtualEntryType type = 3;
+  VirtualEntryState state = 4;
+  optional uint64 size = 5;
+  optional int64 modified_utc_day = 6;
+  bytes sha256 = 7;
+}
+message ListDirectoryRequest {
+  VirtualPath directory = 1;
+  bool recursive = 2;
+  uint32 page_size = 3;
+  bytes continuation = 4;
+}
+// Non-OK results carry ONLY status. Recursive OK carries directory + catalog
+// identity/version only. Direct OK carries directory + entries/cursor/complete.
+message ListDirectoryResult {
+  FileShareStatus status = 1;
+  VirtualPath directory = 2;
+  repeated DirectoryEntry entries = 3;
+  bytes continuation = 4;
+  bool complete = 5;
+  bytes catalog_transfer_id = 6;
+  uint32 catalog_format_version = 7;
+}
+message StatVirtualRequest { VirtualPath path = 1; bytes known_node_id = 2; }
+message StatVirtualResult {
+  FileShareStatus status = 1;
+  DirectoryEntry entry = 2;
+  VirtualPath path = 3;
+}
+message RequestDownload {
+  VirtualPath path = 1;
+  bytes known_node_id = 2;
+  bytes expected_sha256 = 3;
+  optional uint64 expected_size = 4;
+}
+message RequestDownloadResult { FileShareStatus status = 1; bytes transfer_id = 2; }
+message CancelFileShareRequest { uint64 request_to_cancel = 1; }
+message CancelFileShareResult { FileShareStatus status = 1; }

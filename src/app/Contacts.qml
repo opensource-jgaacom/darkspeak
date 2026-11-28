@@ -152,6 +152,16 @@ Page {
             dlg.open();
         }
 
+        function browseFiles() {
+            var contact = currentItem.cco;
+            var component = Qt.createComponent("qrc:/FileBrowserDialog.qml");
+            var dialog = component.createObject(mainWindow, {
+                "parent": mainWindow, "identityId": contact.identity.uuid,
+                "contactId": contact.uuid, "remote": true
+            });
+            dialog.open();
+        }
+
         function copy() {
             manager.textToClipboard(manager.getIdentityText(currentItem.cco.nickName, currentItem.cco.b58identity));
         }
@@ -204,6 +214,19 @@ Page {
             text: qsTr("Edit")
             icon.name: "insert-text"
             onTriggered: list.editCurrent()
+        }
+        MenuItem {
+            text: qsTr("Transfers")
+            enabled: !!list.currentItem
+            onTriggered: {
+                var contact = list.currentItem.cco;
+                mainWindow.openTransfers(contact.identity.uuid, contact.uuid, contact.identity.name, contact.name || contact.nickName);
+            }
+        }
+        MenuItem {
+            text: qsTr("Browse remote files…")
+            enabled: list.currentItem && list.currentItem.cco.online && !list.currentItem.cco.iBlocked
+            onTriggered: list.browseFiles()
         }
 
         MenuItem {

@@ -40,12 +40,22 @@ public:
 
     TransferSession(dsfm::TransferKey key, QUuid connection, QUuid attempt, int local_file = 0);
     virtual ~TransferSession() = default;
+    virtual bool reconciliationOnly() const { return false; }
     const dsfm::TransferKey &key() const noexcept { return key_; }
     QUuid connection() const noexcept { return connection_; }
     QUuid attempt() const noexcept { return attempt_; }
     int localFile() const noexcept { return local_file_; }
     Phase phase() const noexcept { return phase_; }
     const std::optional<Outcome> &outcome() const noexcept { return outcome_; }
+    virtual bool supportsCooperativePause() const { return false; }
+    bool requestCooperativePause(bool local_priority = true);
+    bool pausingForPriority() const { return cooperative_pause_ && local_priority_pause_; }
+    bool cooperativePauseCompleted() const { return cooperative_pause_completed_; }
+    bool claimDeferredCooperativeResume() {
+        if (deferred_resume_ || (!cooperative_pause_ && !cooperative_pause_completed_)) return false;
+        deferred_resume_ = true;
+        return true;
+    }
     bool accepting() const noexcept { return !stop_ && phase_ != Phase::Finalizing && phase_ != Phase::Finished; }
     // Called only after transport validation. Counts/bytes are checked before
     // retaining any peer payload; stale transport/attempt events are rejected.
@@ -58,6 +68,10 @@ signals:
     void phaseChanged();
 
 protected:
+    virtual void cooperativePauseRequested() {}
+    bool cooperativePausePending() const { return cooperative_pause_; }
+    void completeCooperativePause() { cooperative_pause_completed_ = true; }
+    bool persistCooperativeResume(bool enabled = true);
     virtual QCoro::Task<Outcome> execute() = 0;
     // Runs exactly once, after execute and all awaited child work have returned.
     // A definite publication may supersede cancellation here.
@@ -92,7 +106,11 @@ private:
     std::deque<Event> events_;
     size_t chunks_ = 0;
     QTimer deadline_;
+    QTimer cooperative_deadline_;
     bool notification_pending_ = false;
+    bool cooperative_pause_ = false, local_priority_pause_ = false;
+    bool cooperative_pause_completed_ = false;
+    bool deferred_resume_ = false;
     QPointer<TransferManager> manager_;
 };
 

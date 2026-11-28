@@ -27,7 +27,7 @@ UiDialog {
                 Layout.preferredWidth: 150 * appearance.factor
                 Layout.fillHeight: true
                 currentIndex: root.initialSection
-                model: [qsTr("General"), qsTr("Appearance"), qsTr("Tor"), qsTr("Files / Paths"), qsTr("Logging"), qsTr("Limits"), qsTr("Events")].concat(mcp ? [qsTr("MCP")] : [])
+                model: [qsTr("General"), qsTr("Appearance"), qsTr("Tor"), qsTr("Files / Paths"), qsTr("Logging"), qsTr("Limits"), qsTr("Events"), qsTr("Storage")].concat(mcp ? [qsTr("MCP")] : [])
                 delegate: ItemDelegate {
                     required property int index
                     required property string modelData
@@ -42,7 +42,7 @@ UiDialog {
                 Layout.fillHeight: true
                 currentIndex: sections.currentIndex
                 Repeater {
-                    model: ["GeneralSettings.qml", "AppearanceSettings.qml", "TorSettings.qml", "PathsSettings.qml", "LogSettings.qml", "ResourceLimitsSettings.qml", "EventsSettings.qml"].concat(mcp ? ["McpSettings.qml"] : [])
+                    model: ["GeneralSettings.qml", "AppearanceSettings.qml", "TorSettings.qml", "PathsSettings.qml", "LogSettings.qml", "ResourceLimitsSettings.qml", "EventsSettings.qml", "StorageSettings.qml"].concat(mcp ? ["McpSettings.qml"] : [])
                     ScrollView {
                         id: scroll
                         required property int index

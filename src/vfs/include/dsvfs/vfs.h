@@ -189,7 +189,9 @@ class Vfs final : public QObject {
                                                                       Request request, CancellationToken cancel = {});
     // Validate hostile export content before a consumer publishes its cache.
     QCoro::Task<Result<void>> validateCatalog(std::shared_ptr<dsfm::IFileReader> reader, quint64 size,
-                                              QByteArray sha256, CancellationToken cancel = {});
+                                              QByteArray sha256, CancellationToken cancel = {},
+                                              std::optional<bool> expected_allow_utf8 = {},
+                                              std::optional<bool> expected_recursive = {});
     QCoro::Task<Result<void>> refresh();
     QCoro::Task<Result<void>> shutdown();
   signals:

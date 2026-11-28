@@ -66,7 +66,7 @@ message VirtualName {
   string value = 2;                 // one component, same canonical rule
 }
 message DirectoryEntry {
-  bytes node_id = 1;                // fixed bounded opaque virtual ID
+  bytes node_id = 1;                // exactly 32 bytes; opaque view-scoped wire ID
   VirtualName name = 2;
   VirtualEntryType type = 3;
   VirtualEntryState state = 4;
@@ -113,7 +113,7 @@ message ListDirectoryResult {
 2. **On refusal:** return ONLY `status=FILESHARE_RECURSION_REFUSED` with correlation ID; do **not** populate `directory`, `entries`, `continuation`, `complete`, transfer ID, format version, or any enumeration/size/hidden-policy detail. Do not start staging or a generic file offer.
 3. **On approval:** build a bounded authorization-filtered `Vfs::exportCatalog` in private temporary storage. It serializes permitted subtree entries, checks every traversal, detects cycles by resolved backend directory identity (including symlink/hard-link/mount aliases) using bounded ancestor/visited sets, and enforces entries/bytes/depth/time. An alias to an already visited target is not recursively expanded. If cycle-safe traversal cannot be guaranteed, export fails without a partial result. The result is complete within per-directory snapshot semantics or fails without publication. Stage, hash, then send `status=FILESHARE_OK`, the catalog transfer ID and format version, and offer exactly that immutable artifact via the existing generic file-transfer protocol. Never emit a partial catalog disguised as complete.
 4. If staging fails, return a generic error with no entry data, offer or partial artifact. Revocation cancels affected generation/transfer at a safe boundary. The client may retry `recursive=false` at the same root and manually enumerate specific directory paths. **The server never falls back from denied recursion to a nonrecursive listing in the same request.**
-5. Recursive catalog bytes use the existing versioned VFS catalog representation and `validateCatalog`; they are ordinary content bytes, not a second control-frame sequence. The catalog itself records its effective presentation/format version so a receiver validates tags and ASCII policy before showing anything. The completed transfer proves integrity, not access to later file contents.
+5. Recursive catalog bytes use the portable VFS catalog version **2** representation (`../vfs.md` §6.1) and `validateCatalog`; they are ordinary content bytes, not a second control-frame sequence. The catalog itself records its effective presentation/format version so a receiver validates tags and ASCII policy before showing anything. The completed transfer proves integrity, not access to later file contents.
 
 **Result sum-type invariants:** status != OK implies all data/continuation/transfer fields absent/default; OK + nonrecursive implies no catalog fields; OK + recursive implies no inline entries/cursor/`complete`. Invalid combinations are protocol errors, not guessed fallback forms. The response's request correlation never doubles as an authorization token.
 
@@ -160,6 +160,8 @@ message CancelFileShareResult {
 
 - Cancellation only applies to a pending *FileShare request* (e.g., catalog generation), not a previously accepted generic transfer, whose own FileCancel/pause lifecycle is authoritative. Idempotently cancel request work without exposing whether a hidden request existed. Late responses do not reactivate cancelled work.
 - Live directory subscriptions and notifications are **optional for initial release**: if implemented, use a separately negotiated sub-capability or documented message types with bounded leases, revocation, visible-only digest and request correlation. Do not opportunistically invent an unbounded notification bus. Direct LIST and recursive catalog transfers work without subscriptions.
+
+FileShare v1 controls have a fixed 262144-byte envelope ceiling, 4096 encoded path bytes, 64 components, 765 UTF-8 logical bytes per component (2295 escaped bytes), 2048 cursor bytes, 32-byte opaque wire node IDs, and at most 16 pending requests per direction per connection. Wire node IDs are view-scoped references; existing private VFS route tokens are not sent as wire IDs. Control bytes, names and field cardinality are validated before Qt string decoding; duplicate singular/unknown feature fields and noncanonical scalar encodings that would narrow or coerce into accepted values fail closed.
 
 All FileShare-specific requests have finite bytes, queue slots, expiries and concurrency. Initially use existing `dsvfs::Limits`: at most 100 entries per direct page, 64 max virtual depth, 30-second ordinary request deadline, max 2 active generated/retained catalog exports globally (subject to per-contact/identity limits), max 1,000,000 export entries and 256 MiB export size. The wire bound may be **stricter** than an internal VFS limit; an operator cannot turn off hard caps. Distinguish default values from actual local admission controls. Check raw lengths before decoding, hashes, lookup, recursive traversal, allocations and expensive hashing. Never include native OS text in refusal or error details.
 

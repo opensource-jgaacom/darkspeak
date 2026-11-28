@@ -116,6 +116,28 @@ void File::cancel()
         return;
     }
 
+    auto &manager = DsEngine::instance().transfers();
+    if (const auto key = checkpointKey(); key && manager.workStore()) {
+        const auto work = manager.workStore()->find(key.value());
+        if (!work && work.error().code != dsfm::ErrorCode::MissingEntry) {
+            LFLOG_WARN << "Transfer cancellation lookup failed; code=" << int(work.error().code);
+            DsEngine::instance().reportStatus(tr("Cannot read the transfer queue. Try again."), DsEngine::StatusLevel::ERROR);
+            return;
+        }
+        if (work && work.value().state != WorkState::Cancelled) {
+            // Cards and Transfers persist the same cancellation intent before
+            // notifying the sole cleanup owner. cancelWork may call back here
+            // without a live session; the Cancelled row then permits cleanup.
+            const auto cancelled = manager.cancelWork(key.value());
+            if (!cancelled) {
+                LFLOG_WARN << "Transfer cancellation command declined; code=" << int(cancelled.error().code);
+                DsEngine::instance().reportStatus(tr("Cannot cancel this transfer in its current state."),
+                                                 DsEngine::StatusLevel::ERROR);
+            }
+            return;
+        }
+    }
+
     if (auto session = DsEngine::instance().transfers().findLocalFile(getId())) {
         session->stop(TransferSession::Stop::Cancelled);
         return;
@@ -252,8 +274,10 @@ void File::resume()
         return;
     }
 
-    if (auto *contact = getContact(); contact && contact->isOnline() && contact->getState() == Contact::ACCEPTED)
-        contact->resumeFile(*this);
+    auto &manager = DsEngine::instance().transfers();
+    if (!manager.bindWork(shared_from_this())) return;
+    const auto key = checkpointKey();
+    if (key) manager.pauseQueuedWork(key.value(), false);
     } catch (const std::exception& ex) {
         LFLOG_ERROR << "Failed to resume file #" << getId() << ": " << ex.what();
         DsEngine::instance().reportStatus(
@@ -554,9 +578,12 @@ QCoro::Task<dsfm::Result<quint64>> File::prepareIncoming(dsfm::CancellationToken
     auto ready = co_await storage.ready();
     if (!ready) co_return ready.error();
     if (storage_cancel_.cancelled()) co_return Error{ErrorCode::Cancelled};
+    const bool catalog = getMimeType() == "application/vnd.darkspeak.vfs-catalog+jsonl";
+    const auto area = catalog ? ManagedStorage::Private : ManagedStorage::Downloads;
     quint64 offset = 0;
     if (!pendingId().isNull()) {
-        if (!storage.isDownloadNamespace(storageNamespace())) co_return Error{ErrorCode::InvalidArgument};
+        if (catalog ? storageNamespace() != storage.namespaceId(ManagedStorage::Private)
+                    : !storage.isDownloadNamespace(storageNamespace())) co_return Error{ErrorCode::InvalidArgument};
         auto opened = co_await storage.manager().openPending(storageNamespace(), pendingId());
         if (!opened) co_return opened.error();
         auto pending = std::move(opened).value();
@@ -578,27 +605,27 @@ QCoro::Task<dsfm::Result<quint64>> File::prepareIncoming(dsfm::CancellationToken
         offset -= offset % (8 * 1024);
     } else {
         if (!storageId().isNull()) co_return Error{ErrorCode::Conflict}; // A published reference cannot become a new partial.
-        auto directory = storage.root(ManagedStorage::Downloads);
-        if (DsEngine::instance().settings().value("includeConversationNameInDownloadPath", false).toBool()) {
+        auto directory = storage.root(area);
+        if (!catalog && DsEngine::instance().settings().value("includeConversationNameInDownloadPath", false).toBool()) {
             const auto name = QStringLiteral("conversation-%1").arg(getConversationId());
-            auto found = co_await storage.manager().lookup(storage.namespaceId(ManagedStorage::Downloads), name);
+            auto found = co_await storage.manager().lookup(storage.namespaceId(area), name);
             if (found) directory = found.value().id;
             else if (found.error().code == ErrorCode::MissingEntry) {
-                auto made = co_await storage.manager().mkdir(storage.namespaceId(ManagedStorage::Downloads), directory, name);
+                auto made = co_await storage.manager().mkdir(storage.namespaceId(area), directory, name);
                 if (!made && made.error().code == ErrorCode::Conflict) {
-                    auto existing = co_await storage.manager().lookup(storage.namespaceId(ManagedStorage::Downloads), name);
+                    auto existing = co_await storage.manager().lookup(storage.namespaceId(area), name);
                     if (!existing) co_return existing.error();
                     directory = existing.value().id;
                 } else if (!made) co_return made.error();
                 else directory = made.value();
             } else co_return found.error();
         }
-        dsfm::CreateOptions options{directory, getName()};
+        dsfm::CreateOptions options{directory, catalog ? QString::fromLatin1(getFileId().toHex()) + ".jsonl" : getName()};
         options.content = {quint64(getSize()), getHash()};
-        auto created = co_await storage.manager().createFile(storage.namespaceId(ManagedStorage::Downloads), options);
+        auto created = co_await storage.manager().createFile(storage.namespaceId(area), options);
         if (!created) co_return created.error();
         auto pending = std::move(created).value();
-        data_->storage_namespace = storage.namespaceId(ManagedStorage::Downloads);
+        data_->storage_namespace = storage.namespaceId(area);
         data_->storage_id = pending.info.file_id;
         data_->pending_id = pending.info.id;
         writer_ = std::move(pending.writer);
@@ -746,6 +773,7 @@ QCoro::Task<dsfm::Result<void>> File::pauseTransfer(QUuid attempt, dsfm::Transfe
         getState() == FS_DONE || getState() == FS_CANCELLED || getState() == FS_REJECTED)
         co_return dsfm::Error{dsfm::ErrorCode::Cancelled};
     LFLOG_DEBUG << "Transfer paused; reason=" << int(reason);
+    recovery_validated_ = true;
     setState(FS_PAUSED);
     emit transferDone(this, false);
     co_return dsfm::Result<void>{};
@@ -1351,12 +1379,16 @@ File::ptr_t File::load(QObject &parent, const std::function<void (QSqlQuery &)> 
         }
     }
 
-    if (ptr->checkpointInterval()) ptr->recoverCheckpointProgress(ptr);
+    if (ptr->checkpointInterval()) {
+        ptr->recovery_pending_ = true;
+        ptr->recoverCheckpointProgress(ptr);
+    }
     else if (!ptr->pendingId().isNull()) ptr->recoverStorage(ptr);
     return ptr;
 }
 
 QCoro::Task<void> File::recoverCheckpointProgress(File::ptr_t self) {
+    const auto recovered = qScopeGuard([this] { recovery_pending_ = false; emit recoveryFinished(); });
     const auto previous = checkpoint_attempt_;
     const auto state = getState();
     const auto recovery_key = checkpointKey();
@@ -1372,6 +1404,7 @@ QCoro::Task<void> File::recoverCheckpointProgress(File::ptr_t self) {
     if (!saved || saved.value().description.size != quint64(getSize()) ||
         saved.value().description.sha256 != getHash() || saved.value().description.interval != checkpointInterval())
         co_return; // Retain the partial for explicit recovery; never fall back to legacy.
+    recovery_validated_ = true;
     if (saved.value().failure != dsfm::TransferFailureReason::None) {
         data_->failure_reason = saved.value().failure;
         data_->pause_reason = dsfm::TransferPauseReason::None;
@@ -1476,6 +1509,7 @@ void File::queueForTransfer()
 {
     assert(getDirection() == INCOMING);
     assert(getState() == FS_OFFERED || getState() == FS_QUEUED);
+    if (!DsEngine::instance().transfers().acceptWork(*this)) return;
     setState(FS_QUEUED);
     if (auto contact = getContact()) {
         // FIXME: shared_from_this() don't work from the file instance
@@ -1520,6 +1554,7 @@ void File::projectTransferOutcome(quint32 interval, dsfm::TransferPauseReason pa
     data_->checkpoint_interval = interval;
     data_->pause_reason = pause;
     data_->failure_reason = failure;
+    recovery_validated_ = state == FS_PAUSED && failure == dsfm::TransferFailureReason::None;
     setState(state);
     emit transferDone(this, state == FS_DONE);
     if (source_failure) emit sourceIntegrityFailed();

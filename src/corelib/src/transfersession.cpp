@@ -14,6 +14,15 @@ TransferSession::TransferSession(dsfm::TransferKey key, QUuid connection, QUuid 
     : key_{std::move(key)}, connection_{connection}, local_file_{local_file}, attempt_{attempt} {
     deadline_.setSingleShot(true);
     connect(&deadline_, &QTimer::timeout, this, [this] { stop(Stop::Deadline); });
+    cooperative_deadline_.setSingleShot(true);
+    connect(&cooperative_deadline_, &QTimer::timeout, this, [this] {
+        // An uncooperative peer must not leave the local UI indefinitely
+        // Pausing. Abandon intent, retaining normal checkpoint/I/O ownership.
+        cooperative_pause_ = false;
+        local_priority_pause_ = false;
+        qDebug() << "Transfer cooperative pause intent expired; normal transfer may continue";
+        emit phaseChanged();
+    });
 }
 
 void TransferSession::notify() {
@@ -75,6 +84,30 @@ void TransferSession::stop(Stop reason, dsfm::TransferPauseReason pause, dsfm::T
     events_.clear();
     chunks_ = 0;
     notify();
+}
+
+bool TransferSession::requestCooperativePause(bool local_priority) {
+    if (QThread::currentThread() != thread() || !accepting() ||
+        phase_ != Phase::Transferring || !supportsCooperativePause()) return false;
+    if (cooperative_pause_) return true; // One bounded intent per attempt.
+    cooperative_pause_ = true;
+    local_priority_pause_ = local_priority;
+    cooperative_deadline_.start(30000);
+    qDebug() << "Transfer cooperative pause requested; awaiting durable boundary";
+    try { cooperativePauseRequested(); }
+    catch (const std::exception &) {
+        qWarning() << "Transfer cooperative pause request could not be sent";
+        stop(Stop::Disconnected);
+        return false;
+    }
+    emit phaseChanged();
+    return true;
+}
+
+bool TransferSession::persistCooperativeResume(bool enabled) {
+    // Persist intent before the journal pause/remote ACK, for crash recovery.
+    if (!manager_ || !manager_->workStore()) return false;
+    return bool(manager_->workStore()->resumeAfterPreemption(key_,enabled));
 }
 
 QCoro::Task<std::optional<TransferSession::Event>> TransferSession::nextEvent(std::chrono::milliseconds timeout) {
@@ -170,6 +203,7 @@ QCoro::Task<void> TransferSession::run() {
     phase_ = Phase::Finalizing;
     emit phaseChanged();
     deadline_.stop();
+    cooperative_deadline_.stop();
     events_.clear();
     chunks_ = 0;
     try {

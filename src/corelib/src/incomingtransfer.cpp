@@ -127,6 +127,12 @@ QCoro::Task<bool> IncomingTransfer::selectCheckpoint() {
     co_return false;
 }
 
+void IncomingTransfer::cooperativePauseRequested() {
+    // This is an intent only. Keep the writer and normal checkpoint exchange
+    // alive until the sender explicitly fences its window.
+    peer_->sendCooperativePause(file_->getFileId(), attempt(), last_, 2);
+}
+
 QCoro::Task<bool> IncomingTransfer::confirm(dsfm::DurableCheckpoint checkpoint) {
     auto recorded = co_await file_->recordCheckpoint(attempt(), checkpoint, dsfm::CheckpointPhase::Proposed);
     if (!recorded || !current()) co_return false;
@@ -180,6 +186,15 @@ QCoro::Task<TransferSession::Outcome> IncomingTransfer::execute() {
     while (current()) {
         auto event = co_await nextEvent();
         if (!event || !current()) break;
+        if (event->kind == Event::Kind::Pause && event->sequence == 3) {
+            if (event->checkpoint != last_ || last_.final || last_.offset != offset_ ||
+                !last_.offset || last_.pause_boundary) {
+                peer_->close(); stop(Stop::Disconnected); break;
+            }
+            cooperative_paused_ = true;
+            if (!persistCooperativeResume()) { stop(Stop::ResourceUnavailable); break; }
+            co_return Outcome{Outcome::Kind::Paused, dsfm::TransferPauseReason::FeaturePaused};
+        }
         // Lost receipts may cause a peer to repeat the preceding confirmation.
         if (event->kind == Event::Kind::Checkpoint && last_ != selected_->selected &&
             event->checkpoint == last_ && event->checkpoint_phase == dsfm::CheckpointPhase::SenderConfirmed) {
@@ -274,15 +289,20 @@ QCoro::Task<TransferSession::Outcome> IncomingTransfer::finalize(Outcome result)
             if (!recovered || !recovered.value()) co_return Outcome{Outcome::Kind::Paused, dsfm::TransferPauseReason::ResourceUnavailable};
             result = {Outcome::Kind::Completed};
         } else {
+            // Stop commands can arrive during journal/storage awaits. Keep
+            // their precedence through voluntary pause settlement as well.
+            if (stopped() && result.kind != Outcome::Kind::Failed) result = interrupted();
             const bool discard = result.kind == Outcome::Kind::Cancelled || result.kind == Outcome::Kind::Rejected || stopped() == Stop::RemoteFailure;
             if (saved.value().failure != dsfm::TransferFailureReason::None && saved.value().failure != result.failure)
                 result = {Outcome::Kind::Failed, dsfm::TransferPauseReason::None, saved.value().failure};
-            const bool terminal = result.kind == Outcome::Kind::Failed || result.kind == Outcome::Kind::Cancelled || result.kind == Outcome::Kind::Rejected;
+            auto recorded_failure = saved.value().failure;
+            bool terminal = result.kind == Outcome::Kind::Failed || result.kind == Outcome::Kind::Cancelled || result.kind == Outcome::Kind::Rejected;
             if (terminal && saved.value().failure == dsfm::TransferFailureReason::None) {
                 // Record the cancellation/failure before reclaiming its partial;
                 // a crash cannot turn explicit cancellation into a resumable pause.
                 auto failed = co_await storage.transferProgress().fail(key(), result.failure, saved.value().attempt);
                 if (!failed) throw std::runtime_error("Transfer failure could not be persisted");
+                recorded_failure = result.failure;
             }
             if (writer_) {
                 dsfm::Result<void> settled;
@@ -300,6 +320,39 @@ QCoro::Task<TransferSession::Outcome> IncomingTransfer::finalize(Outcome result)
                 auto paused = co_await storage.transferProgress().pause(key(), saved.value().attempt, result.pause);
                 if (!paused) throw std::runtime_error("Transfer pause could not be persisted");
             }
+            // A cancellation/revocation while suspend or pause was awaiting
+            // must be durably settled before projecting state or sending ACK.
+            // Stop precedence can strengthen only finitely many times.
+            bool settled_stop = false;
+            for (int pass = 0; pass != 4; ++pass) {
+                auto latest = stopped() && result.kind != Outcome::Kind::Failed ? interrupted() : result;
+                if (recorded_failure != dsfm::TransferFailureReason::None && latest.failure != recorded_failure)
+                    latest = {Outcome::Kind::Failed, dsfm::TransferPauseReason::None, recorded_failure};
+                if (latest.kind == result.kind && latest.pause == result.pause && latest.failure == result.failure) {
+                    settled_stop = true;
+                    break;
+                }
+                result = latest;
+                terminal = result.kind == Outcome::Kind::Failed || result.kind == Outcome::Kind::Cancelled || result.kind == Outcome::Kind::Rejected;
+                if (terminal) {
+                    auto failed = co_await storage.transferProgress().fail(key(), result.failure, saved.value().attempt);
+                    if (!failed) throw std::runtime_error("Late transfer stop could not be persisted");
+                    recorded_failure = result.failure;
+                    if ((result.kind == Outcome::Kind::Cancelled || result.kind == Outcome::Kind::Rejected || stopped() == Stop::RemoteFailure) &&
+                        !file_->pendingId().isNull()) {
+                        auto aborted = co_await storage.manager().abortPending(file_->storageNamespace(), file_->pendingId());
+                        if (!aborted && aborted.error().code != dsfm::ErrorCode::MissingEntry)
+                            throw std::runtime_error("Late transfer cancellation partial could not be reclaimed");
+                    }
+                } else {
+                    auto paused = co_await storage.transferProgress().pause(key(), saved.value().attempt, result.pause);
+                    if (!paused) throw std::runtime_error("Late transfer pause could not be persisted");
+                }
+            }
+            if (!settled_stop) throw std::runtime_error("Transfer stop did not stabilize during finalization");
+            if (!(result.kind == Outcome::Kind::Paused && result.pause == dsfm::TransferPauseReason::FeaturePaused) &&
+                !persistCooperativeResume(false))
+                throw std::runtime_error("Overridden cooperative pause resume preference could not be cleared");
             file_->projectTransferOutcome(saved.value().description.interval, terminal ? dsfm::TransferPauseReason::None : result.pause,
                 terminal ? result.failure : dsfm::TransferFailureReason::None,
                 result.kind == Outcome::Kind::Cancelled ? File::FS_CANCELLED : result.kind == Outcome::Kind::Rejected ? File::FS_REJECTED :
@@ -308,7 +361,12 @@ QCoro::Task<TransferSession::Outcome> IncomingTransfer::finalize(Outcome result)
                 try {
                     if (result.kind == Outcome::Kind::Cancelled) peer_->sendFileCancel(file_->getFileId(), FileCancelReason::UserAction);
                     else if (result.kind == Outcome::Kind::Rejected) peer_->sendFileOfferResponse(file_->getFileId(), FileOfferResponseStatus::Rejected);
-                    else if (!terminal && selected_ && file_->getChannel()) peer_->sendFilePause(file_->getFileId(), attempt(), last_, result.pause);
+                    else if (!terminal && selected_ && file_->getChannel()) {
+                        if (cooperative_paused_ && !stopped() && result.pause == dsfm::TransferPauseReason::FeaturePaused) {
+                            peer_->sendCooperativePause(file_->getFileId(), attempt(), last_, 4);
+                            completeCooperativePause();
+                        } else peer_->sendFilePause(file_->getFileId(), attempt(), last_, result.pause);
+                    }
                 } catch (...) {}
             }
         }

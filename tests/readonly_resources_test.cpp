@@ -57,6 +57,7 @@ struct Fixture {
             if (!removed) co_return removed.error();
             co_return co_await backend.removeSource(ns);
         };
+        host.usage = [this](NamespaceId ns) { return backend.sourceUsage(ns); };
         host.config = [this](NamespaceId ns) { return backend.sourceConfig(ns); };
         host.info = [this](NamespaceId ns) { return backend.namespaceInfo(ns); };
         return host;
@@ -71,6 +72,88 @@ struct Fixture {
 class ReadOnlyResourcesTest : public QObject {
     Q_OBJECT
 private slots:
+    void pollingOnlyNotifiesChangedFields() {
+        Fixture f;
+        auto host = f.host();
+        ReadOnlySourceUsage usage{1, 21};
+        int inspections = 0;
+        bool queue_rename = false;
+        ReadOnlyResources *current_model = nullptr;
+        host.usage = [&](NamespaceId ns) -> QCoro::Task<Result<ReadOnlySourceUsage>> {
+            if (queue_rename) {
+                queue_rename = false;
+                current_model->rename(ns.toString(), "Queued rename");
+            }
+            co_return usage;
+        };
+        host.config = [&](NamespaceId ns) -> QCoro::Task<Result<ReadOnlyNamespaceConfig>> {
+            auto result = co_await f.backend.sourceConfig(ns);
+            ++inspections;
+            co_return result;
+        };
+        ReadOnlyResources model(f.registry, std::move(host));
+        current_model = &model;
+        QCoro::waitFor(model.load()); f.draft(model);
+        QCoro::waitFor(model.create());
+        QTRY_VERIFY_WITH_TIMEOUT(QCoro::waitFor(f.backend.namespaceInfo(f.id(model))).value().status == NamespaceStatus::Ready, 10000);
+        model.refresh(); QTRY_VERIFY(!model.busy());
+        QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+        QSignalSpy reset(&model, &QAbstractItemModel::modelReset);
+        QSignalSpy inserted(&model, &QAbstractItemModel::rowsInserted);
+        QSignalSpy removed(&model, &QAbstractItemModel::rowsRemoved);
+        QSignalSpy state(&model, &ReadOnlyResources::stateChanged);
+        auto previous = inspections;
+        QTRY_VERIFY_WITH_TIMEOUT(inspections > previous, 4000);
+        QCOMPARE(changed.count(), 0);
+        QCOMPARE(state.count(), 0); // background polling never flashes busy controls
+        usage.bytes = 1700000000000ULL;
+        previous = inspections;
+        QTRY_VERIFY_WITH_TIMEOUT(inspections > previous, 4000);
+        QCOMPARE(changed.count(), 1);
+        QCOMPARE(qvariant_cast<QList<int>>(changed.takeFirst().at(2)), QList<int>{ReadOnlyResources::Size});
+        QCOMPARE(state.count(), 0);
+        QCOMPARE(model.data(model.index(0), ReadOnlyResources::Size).toULongLong(), usage.bytes);
+        queue_rename = true; // a user action arriving inside a silent poll must run
+        QTRY_COMPARE_WITH_TIMEOUT(model.data(model.index(0), ReadOnlyResources::Name).toString(), "Queued rename", 4000);
+        QTRY_VERIFY(!model.busy());
+        QCOMPARE(changed.count(), 1);
+        QCOMPARE(qvariant_cast<QList<int>>(changed.takeFirst().at(2)), QList<int>{ReadOnlyResources::Name});
+        QCOMPARE(reset.count(), 0);
+        QCOMPARE(inserted.count(), 0);
+        QCOMPARE(removed.count(), 0);
+    }
+    void directoryNameUsageAndRename() {
+        Fixture f;
+        QUuid source;
+        {
+            ReadOnlyResources model(f.registry, f.host());
+            QCoro::waitFor(model.load());
+            f.draft(model); model.setProperty("draftName", "   ");
+            QCoro::waitFor(model.create());
+            QCOMPARE(model.errorCode(), -1);
+            QCOMPARE(model.data(model.index(0), ReadOnlyResources::Name).toString(), "source");
+            source = f.id(model);
+            QTRY_VERIFY_WITH_TIMEOUT(QCoro::waitFor(f.backend.namespaceInfo(source)).value().status == NamespaceStatus::Ready, 10000);
+            model.refresh(); QTRY_VERIFY(!model.busy());
+            QCOMPARE(model.data(model.index(0), ReadOnlyResources::FileCount).toULongLong(), 1ULL);
+            QCOMPARE(model.data(model.index(0), ReadOnlyResources::Size).toULongLong(), quint64(QByteArray("bounded test content").size()));
+            QCoro::waitFor(model.renameSource(source, "Renamed source"));
+            QCOMPARE(model.errorCode(), -1);
+            QCOMPARE(f.id(model), source);
+            QCoro::waitFor(model.renameSource(source, QString(129, u'x')));
+            QCOMPARE(model.errorCode(), int(ErrorCode::InvalidName));
+            QCOMPARE(model.data(model.index(0), ReadOnlyResources::Name).toString(), "Renamed source");
+            QVERIFY(QCoro::waitFor(f.backend.closeSource(source)));
+        }
+        ReadOnlyResources reopened(f.registry, f.host());
+        QCoro::waitFor(reopened.load());
+        QCOMPARE(f.id(reopened), source);
+        QCOMPARE(reopened.data(reopened.index(0), ReadOnlyResources::Name).toString(), "Renamed source");
+        QCoro::waitFor(reopened.renameSource(source, ""));
+        QCOMPARE(reopened.errorCode(), -1);
+        QCOMPARE(reopened.data(reopened.index(0), ReadOnlyResources::Name).toString(), "source");
+        QVERIFY(QFile::exists(f.temporary.filePath("source/file.txt")));
+    }
     void versionOneRegistryFixture() {
         Fixture f;
         QFile fixture(QStringLiteral(DS_STORAGE_FIXTURES "/readonly-resources-v1.json")); QVERIFY(fixture.open(QIODevice::ReadOnly));
